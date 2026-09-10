@@ -26,6 +26,50 @@ function toast(msg, ms = 2400) {
   }, ms);
 }
 
+/** iframe 沙箱通常没有 allow-modals，window.confirm 会静默失败，必须用页面内对话框。 */
+function askConfirm(message, title = "确认操作") {
+  return new Promise((resolve) => {
+    const dialog = $("#confirmDialog");
+    const form = $("#confirmForm");
+    const titleEl = $("#confirmTitle");
+    const msgEl = $("#confirmMessage");
+    const cancelBtn = $("#confirmCancel");
+    if (!dialog || !form || !titleEl || !msgEl || !cancelBtn) {
+      resolve(true);
+      return;
+    }
+
+    titleEl.textContent = title;
+    msgEl.textContent = message;
+
+    const cleanup = () => {
+      form.removeEventListener("submit", onSubmit);
+      cancelBtn.removeEventListener("click", onCancel);
+      dialog.removeEventListener("close", onClose);
+    };
+    const onSubmit = (ev) => {
+      ev.preventDefault();
+      cleanup();
+      dialog.close();
+      resolve(true);
+    };
+    const onCancel = () => {
+      cleanup();
+      dialog.close();
+      resolve(false);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve(false);
+    };
+
+    form.addEventListener("submit", onSubmit);
+    cancelBtn.addEventListener("click", onCancel);
+    dialog.addEventListener("close", onClose, { once: true });
+    dialog.showModal();
+  });
+}
+
 function esc(s) {
   return String(s ?? "")
     .replaceAll("&", "&amp;")
@@ -236,7 +280,14 @@ function bindCardEvents(box) {
           toast("已恢复");
           await refreshCurrent();
         } else if (act === "purge") {
-          if (!confirm("确定永久删除？此操作不可恢复。")) return;
+          const ok = await askConfirm(
+            "确定永久删除这条视频？\n此操作不可恢复。",
+            "永久删除",
+          );
+          if (!ok) {
+            toast("已取消删除");
+            return;
+          }
           await bridge.apiPost("videos/purge", { ids: [id] });
           toast("已永久删除");
           await refreshCurrent();
@@ -518,32 +569,50 @@ function wire() {
 
   $("#btnPublishGithub")?.addEventListener("click", async () => {
     const ids = [...state.selected];
-    if (!ids.length) return;
+    if (!ids.length) {
+      toast("请先勾选要发布的视频");
+      return;
+    }
+    if (!state.adminUnlocked) {
+      toast("请先点击右上角「维护」并输入口令解锁");
+      return;
+    }
     if (!state.canPublish) {
-      toast("未解锁或未配置 Token");
+      toast("未配置 github_token，无法发布。请到插件配置填写 Token 后重载。");
       return;
     }
-    if (
-      !confirm(
-        `将选中的 ${ids.length} 条发布到 GitHub 公共库？\n视频会上传到 Release，并更新 public_index.json。`,
-      )
-    ) {
+    const ok = await askConfirm(
+      `将选中的 ${ids.length} 条发布到 GitHub 公共库？\n视频会上传到 Release，并更新 public_index.json。`,
+      "发布到公共库",
+    );
+    if (!ok) {
+      toast("已取消发布");
       return;
     }
-    toast("正在发布到公共库…");
+
+    const btn = $("#btnPublishGithub");
+    if (btn) btn.disabled = true;
+    toast("正在发布到公共库，请稍候…", 8000);
     try {
       const result = await bridge.apiPost("public/publish", { ids });
+      const errHint = result.errors?.length
+        ? `\n失败详情见控制台（共 ${result.errors.length} 条）`
+        : "";
       toast(
-        `发布完成：成功 ${result.published || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}`,
-        4000,
+        `发布完成：成功 ${result.published || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}${errHint}`,
+        5000,
       );
       if (result.errors?.length) {
         console.warn("publish errors", result.errors);
       }
+      state.selected.clear();
       await refreshCurrent();
       await refreshAdminStatus();
     } catch (err) {
-      toast(`发布失败：${err.message || err}`);
+      toast(`发布失败：${err.message || err}`, 5000);
+      console.error("publish failed", err);
+    } finally {
+      updateBatchButtons();
     }
   });
 
@@ -595,11 +664,22 @@ function wire() {
 
   $("#btnBatchPurge")?.addEventListener("click", async () => {
     const ids = [...state.selected];
-    if (!ids.length) return;
-    if (!confirm(`确定永久删除 ${ids.length} 条？不可恢复。`)) return;
+    if (!ids.length) {
+      toast("请先勾选要删除的视频");
+      return;
+    }
+    const ok = await askConfirm(
+      `确定永久删除 ${ids.length} 条？\n此操作不可恢复。`,
+      "永久删除",
+    );
+    if (!ok) {
+      toast("已取消删除");
+      return;
+    }
     try {
       await bridge.apiPost("videos/purge", { ids });
       toast(`已永久删除 ${ids.length} 条`);
+      state.selected.clear();
       await refreshCurrent();
     } catch (err) {
       toast(`永久删除失败：${err.message || err}`);

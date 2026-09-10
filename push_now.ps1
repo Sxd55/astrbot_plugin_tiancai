@@ -3,7 +3,7 @@ Set-Location -LiteralPath $PSScriptRoot
 
 $RemoteUrl = "https://github.com/sxd55/astrbot_plugin_tiancai.git"
 $LogFile = Join-Path $PSScriptRoot "push_log.txt"
-$CommitMsg = "feat(v1.5.0): admin publish to GitHub public library with proxy"
+$CommitMsg = "fix: replace iframe confirm() with in-page dialog for publish"
 
 function Write-Log([string]$Message) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
