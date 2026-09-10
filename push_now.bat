@@ -8,6 +8,6 @@ if not exist "logo.png" (
   )
 )
 
-echo Pushing v1.6.1 settings UI update...
+echo Pushing v1.7.0 public library manage tab...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0push_now.ps1"
 if errorlevel 1 pause

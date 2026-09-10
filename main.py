@@ -118,7 +118,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.6.1",
+    "1.7.0",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -157,6 +157,10 @@ class TiancaiPlugin(Star):
             ("public/status", self.api_public_status, ["GET"], "公共源状态"),
             ("public/sync", self.api_public_sync, ["POST"], "手动同步公共菜单"),
             ("public/publish", self.api_public_publish, ["POST"], "批量发布到公共库"),
+            ("public/managed/list", self.api_public_managed_list, ["GET"], "列出可管理的公共库"),
+            ("public/managed/update", self.api_public_managed_update, ["POST"], "编辑公共库条目"),
+            ("public/managed/delete", self.api_public_managed_delete, ["POST"], "删除公共库条目"),
+            ("public/managed/import", self.api_public_managed_import, ["POST"], "公共库下载到本地"),
             ("config/get", self.api_config_get, ["GET"], "读取插件配置"),
             ("config/save", self.api_config_save, ["POST"], "保存插件配置"),
         ]
@@ -662,6 +666,385 @@ class TiancaiPlugin(Star):
             ),
         )
         return json_response(result)
+
+    def _require_managed_repo(self) -> tuple[str, str] | Any:
+        token = str(self.config.get("github_token") or "").strip()
+        repo = str(self.config.get("github_repo") or "").strip()
+        if not token:
+            return error_response(
+                "未配置 github_token。管理公共库需要 Token。",
+                status_code=400,
+            )
+        if not repo:
+            return error_response(
+                "未配置 github_repo。请填写你自己的仓库 owner/repo。",
+                status_code=400,
+            )
+        if not re.match(r"^[^/\s]+/[^/\s]+$", repo):
+            return error_response("github_repo 格式应为 owner/repo", status_code=400)
+        return token, repo
+
+    def _public_item_view(self, item: dict[str, Any]) -> dict[str, Any]:
+        size = int(item.get("size") or 0)
+        return {
+            "id": item.get("id"),
+            "seq": int(item.get("seq") or 0),
+            "title": item.get("title") or "",
+            "tags": item.get("tags") or [],
+            "url": item.get("url") or "",
+            "size": size,
+            "size_human": self._fmt_size(size),
+            "created_at": item.get("created_at"),
+            "created_at_human": self._fmt_time(item.get("created_at")) or "",
+            "source_local_id": item.get("source_local_id") or "",
+            "source_local_seq": item.get("source_local_seq"),
+        }
+
+    async def api_public_managed_list(self):
+        req = self._require_managed_repo()
+        if not isinstance(req, tuple):
+            return req
+        token, repo = req
+        branch = str(self.config.get("github_branch") or "main").strip() or "main"
+        index_path = (
+            str(self.config.get("github_index_path") or "public/public_index.json").strip()
+            or "public/public_index.json"
+        )
+        try:
+            remote = await asyncio.to_thread(
+                self._github_get_index_file, repo, branch, index_path, token
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("读取可管理公共库失败")
+            return error_response(str(exc), status_code=500)
+
+        videos = [
+            self._public_item_view(v)
+            for v in (remote.get("videos") or [])
+            if isinstance(v, dict)
+        ]
+        videos.sort(key=lambda x: int(x.get("seq") or 0))
+        # 同步一份到本地公共缓存，方便抽取
+        cache_payload = {k: v for k, v in remote.items() if not str(k).startswith("_")}
+        try:
+            self.public_index_path.write_text(
+                json.dumps(cache_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("写入公共菜单缓存失败")
+
+        return json_response(
+            {
+                "repo": repo,
+                "branch": branch,
+                "index_path": index_path,
+                "name": remote.get("name") or "",
+                "updated_at": remote.get("updated_at"),
+                "updated_at_human": self._fmt_time(remote.get("updated_at")) or "",
+                "total": len(videos),
+                "items": videos,
+            }
+        )
+
+    async def api_public_managed_update(self):
+        req = self._require_managed_repo()
+        if not isinstance(req, tuple):
+            return req
+        token, repo = req
+        payload = await request.json(default={})
+        item_id = str(payload.get("id") or "").strip()
+        if not item_id:
+            return error_response("id required", status_code=400)
+
+        branch = str(self.config.get("github_branch") or "main").strip() or "main"
+        index_path = (
+            str(self.config.get("github_index_path") or "public/public_index.json").strip()
+            or "public/public_index.json"
+        )
+
+        async with self._publish_lock:
+            try:
+                remote = await asyncio.to_thread(
+                    self._github_get_index_file, repo, branch, index_path, token
+                )
+                videos = remote.get("videos") or []
+                if not isinstance(videos, list):
+                    return error_response("remote index invalid", status_code=500)
+                target = None
+                for v in videos:
+                    if isinstance(v, dict) and str(v.get("id")) == item_id:
+                        target = v
+                        break
+                if target is None:
+                    return error_response("not found", status_code=404)
+
+                if "title" in payload:
+                    target["title"] = str(payload.get("title") or "")[:200]
+                if "tags" in payload:
+                    tags_raw = payload.get("tags")
+                    tags: list[str] = []
+                    if isinstance(tags_raw, list):
+                        for t in tags_raw:
+                            text = str(t).strip()
+                            if text and text not in tags:
+                                tags.append(text[:32])
+                    elif isinstance(tags_raw, str):
+                        for part in re.split(r"[,，\s]+", tags_raw):
+                            text = part.strip()
+                            if text and text not in tags:
+                                tags.append(text[:32])
+                    if not tags:
+                        tags = list(DEFAULT_TAGS)
+                    target["tags"] = tags[:20]
+
+                remote["updated_at"] = _now()
+                await asyncio.to_thread(
+                    self._github_put_index_file, repo, branch, index_path, remote, token
+                )
+                cache_payload = {
+                    k: v for k, v in remote.items() if not str(k).startswith("_")
+                }
+                self.public_index_path.write_text(
+                    json.dumps(cache_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("更新公共库条目失败")
+                return error_response(str(exc), status_code=500)
+
+        self._audit(
+            "public_managed_update",
+            detail=f"user={request.username};id={item_id};repo={repo}",
+        )
+        return json_response({"ok": True, "item": self._public_item_view(target)})
+
+    async def api_public_managed_delete(self):
+        req = self._require_managed_repo()
+        if not isinstance(req, tuple):
+            return req
+        token, repo = req
+        payload = await request.json(default={})
+        raw_ids = payload.get("ids")
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return error_response("ids required", status_code=400)
+        ids = {str(x).strip() for x in raw_ids if str(x).strip()}
+        if not ids:
+            return error_response("ids required", status_code=400)
+
+        branch = str(self.config.get("github_branch") or "main").strip() or "main"
+        index_path = (
+            str(self.config.get("github_index_path") or "public/public_index.json").strip()
+            or "public/public_index.json"
+        )
+        release_tag = (
+            str(self.config.get("github_release_tag") or "tiancai-videos").strip()
+            or "tiancai-videos"
+        )
+
+        async with self._publish_lock:
+            try:
+                result = await asyncio.to_thread(
+                    self._managed_delete_public_ids,
+                    token,
+                    repo,
+                    branch,
+                    index_path,
+                    release_tag,
+                    ids,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("删除公共库条目失败")
+                return error_response(str(exc), status_code=500)
+
+        self._audit(
+            "public_managed_delete",
+            detail=(
+                f"user={request.username};deleted={result.get('deleted')};"
+                f"repo={repo}"
+            ),
+        )
+        return json_response(result)
+
+    async def api_public_managed_import(self):
+        req = self._require_managed_repo()
+        if not isinstance(req, tuple):
+            return req
+        token, repo = req
+        payload = await request.json(default={})
+        raw_ids = payload.get("ids")
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]
+        if not isinstance(raw_ids, list) or not raw_ids:
+            return error_response("ids required", status_code=400)
+        ids = {str(x).strip() for x in raw_ids if str(x).strip()}
+
+        branch = str(self.config.get("github_branch") or "main").strip() or "main"
+        index_path = (
+            str(self.config.get("github_index_path") or "public/public_index.json").strip()
+            or "public/public_index.json"
+        )
+        try:
+            remote = await asyncio.to_thread(
+                self._github_get_index_file, repo, branch, index_path, token
+            )
+        except Exception as exc:  # noqa: BLE001
+            return error_response(str(exc), status_code=500)
+
+        by_id = {
+            str(v.get("id")): v
+            for v in (remote.get("videos") or [])
+            if isinstance(v, dict) and v.get("id")
+        }
+        imported = []
+        failed = []
+        skipped = []
+        for item_id in ids:
+            item = by_id.get(item_id)
+            if not item:
+                failed.append({"id": item_id, "error": "公共库中不存在"})
+                continue
+            # 已存在则跳过
+            index = self._load_index()
+            exists = any(
+                isinstance(v, dict)
+                and v.get("deleted_at") is None
+                and str(v.get("source_public_id") or "") == item_id
+                for v in index.get("videos", [])
+            )
+            if exists:
+                skipped.append({"id": item_id, "error": "本地已导入"})
+                continue
+            try:
+                url = str(item.get("url") or "")
+                suffix = Path(urlparse(url).path).suffix.lower() or ".mp4"
+                if suffix not in VIDEO_SUFFIXES:
+                    suffix = ".mp4"
+                cache_path = self.public_cache_dir / f"{item_id}{suffix}"
+                await asyncio.to_thread(self._http_download, url, cache_path)
+                record = self._import_cached_public_video(item, cache_path)
+                if record is None:
+                    failed.append({"id": item_id, "error": "导入失败（库满或写入失败）"})
+                else:
+                    imported.append(
+                        {
+                            "id": item_id,
+                            "local_id": record.get("id"),
+                            "seq": record.get("seq"),
+                        }
+                    )
+            except Exception as exc:  # noqa: BLE001
+                failed.append({"id": item_id, "error": str(exc)})
+
+        self._audit(
+            "public_managed_import",
+            detail=(
+                f"user={request.username};ok={len(imported)};"
+                f"fail={len(failed)};repo={repo}"
+            ),
+        )
+        return json_response(
+            {
+                "imported": len(imported),
+                "failed": len(failed),
+                "skipped": len(skipped),
+                "items": imported,
+                "errors": failed,
+                "skipped_items": skipped,
+            }
+        )
+
+    def _managed_delete_public_ids(
+        self,
+        token: str,
+        repo: str,
+        branch: str,
+        index_path: str,
+        release_tag: str,
+        ids: set[str],
+    ) -> dict[str, Any]:
+        remote = self._github_get_index_file(repo, branch, index_path, token)
+        videos = remote.get("videos") or []
+        if not isinstance(videos, list):
+            raise RuntimeError("remote index invalid")
+
+        kept: list[dict[str, Any]] = []
+        removed: list[dict[str, Any]] = []
+        for v in videos:
+            if not isinstance(v, dict):
+                continue
+            vid = str(v.get("id") or "")
+            if vid in ids:
+                removed.append(v)
+            else:
+                kept.append(v)
+
+        # 尝试删除 Release 附件
+        asset_errors: list[dict[str, str]] = []
+        try:
+            release = self._github_ensure_release(repo, release_tag, token)
+            release_id = release.get("id")
+            assets = release.get("assets") or []
+            if not isinstance(assets, list) and release_id:
+                assets = self._http_json(
+                    "GET",
+                    f"{GITHUB_API}/repos/{repo}/releases/{release_id}/assets",
+                    token=token,
+                )
+            name_to_asset = {
+                str(a.get("name")): a
+                for a in (assets or [])
+                if isinstance(a, dict) and a.get("name")
+            }
+            for item in removed:
+                url = str(item.get("url") or "")
+                asset_name = Path(urlparse(url).path).name
+                # 也尝试 id + 常见后缀
+                candidates = [asset_name] if asset_name else []
+                pid = str(item.get("id") or "")
+                for suf in VIDEO_SUFFIXES:
+                    candidates.append(f"{pid}{suf}")
+                deleted_asset = False
+                for name in candidates:
+                    asset = name_to_asset.get(name)
+                    if not asset:
+                        continue
+                    asset_id = asset.get("id")
+                    if not asset_id:
+                        continue
+                    try:
+                        self._http_json(
+                            "DELETE",
+                            f"{GITHUB_API}/repos/{repo}/releases/assets/{asset_id}",
+                            token=token,
+                        )
+                        deleted_asset = True
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        asset_errors.append({"id": pid, "error": str(exc)})
+                if not deleted_asset and asset_name:
+                    # 附件可能已不在，不算致命
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            asset_errors.append({"id": "*", "error": f"release cleanup: {exc}"})
+
+        remote["videos"] = kept
+        remote["updated_at"] = _now()
+        self._github_put_index_file(repo, branch, index_path, remote, token)
+        cache_payload = {k: v for k, v in remote.items() if not str(k).startswith("_")}
+        self.public_index_path.write_text(
+            json.dumps(cache_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return {
+            "deleted": len(removed),
+            "remaining": len(kept),
+            "items": [self._public_item_view(v) for v in removed],
+            "asset_errors": asset_errors,
+            "repo": repo,
+        }
 
     async def api_config_get(self):
         data = {}

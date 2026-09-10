@@ -7,9 +7,13 @@ const state = {
   total: 0,
   scope: "active",
   selected: new Set(),
+  publicSelected: new Set(),
+  publicItemsById: new Map(),
+  publicFilter: "",
   stats: null,
   itemsById: new Map(),
   canPublish: false,
+  canManagePublic: false,
   config: null,
 };
 
@@ -312,6 +316,7 @@ function esc(s) {
 function setTab(name) {
   state.tab = name;
   state.selected.clear();
+  state.publicSelected.clear();
   $$(".tab").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.tab === name);
   });
@@ -322,6 +327,8 @@ function setTab(name) {
     state.scope = "active";
     state.page = 1;
     loadLibrary();
+  } else if (name === "public") {
+    loadPublicManaged();
   } else if (name === "trash") {
     state.scope = "trash";
     state.page = 1;
@@ -334,6 +341,7 @@ function setTab(name) {
     loadStats();
   }
   updateBatchButtons();
+  updatePublicButtons();
 }
 
 async function loadStats() {
@@ -370,7 +378,9 @@ async function loadStats() {
         : "公共源未启用";
     }
     state.canPublish = !!pub.token_configured && !!(pub.repo || "").trim();
+    state.canManagePublic = state.canPublish;
     updateBatchButtons();
+    updatePublicButtons();
   } catch (err) {
     toast(`加载总览失败：${err.message || err}`);
   }
@@ -584,6 +594,175 @@ function updateBatchButtons() {
   }
 }
 
+function updatePublicButtons() {
+  const n = state.publicSelected.size;
+  const del = $("#btnPublicDelete");
+  const imp = $("#btnPublicImport");
+  const refresh = $("#btnPublicRefresh");
+  if (del) del.disabled = !state.canManagePublic || n === 0;
+  if (imp) imp.disabled = !state.canManagePublic || n === 0;
+  if (refresh) refresh.disabled = !state.canManagePublic;
+  const hint = $("#publicManageHint");
+  if (hint) {
+    hint.textContent = state.canManagePublic
+      ? "已配置 Token 与仓库：可刷新、编辑、删除公共库条目，或下载到本地。"
+      : "此栏管理设置里 github_repo 指向的仓库。请先在「设置」填写 github_token 与 github_repo。";
+  }
+}
+
+async function loadPublicManaged() {
+  const box = $("#publicList");
+  if (!box) return;
+  box.innerHTML = `<div class="empty">加载中…</div>`;
+  updatePublicButtons();
+  if (!state.canManagePublic) {
+    // 尝试再读一次 stats/config
+    try {
+      const stats = await bridge.apiGet("stats");
+      const pub = stats.public || {};
+      state.canManagePublic = !!pub.token_configured && !!(pub.repo || "").trim();
+      state.canPublish = state.canManagePublic;
+      updatePublicButtons();
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!state.canManagePublic) {
+    box.classList.add("empty");
+    box.textContent = "未配置 github_token / github_repo，无法管理公共库。";
+    return;
+  }
+  try {
+    const data = await bridge.apiGet("public/managed/list");
+    let items = data.items || [];
+    const q = (state.publicFilter || $("#publicSearchQ")?.value || "").trim().toLowerCase();
+    if (q) {
+      items = items.filter((it) => {
+        const blob = [
+          it.id,
+          it.seq,
+          it.title,
+          ...(it.tags || []),
+        ]
+          .join(" ")
+          .toLowerCase();
+        return blob.includes(q);
+      });
+    }
+    state.publicItemsById = new Map(items.map((it) => [it.id, it]));
+    if (!items.length) {
+      box.classList.add("empty");
+      box.textContent = q ? "没有匹配的公共条目" : "公共库还是空的，可先从「视频库」发布";
+      return;
+    }
+    box.classList.remove("empty");
+    box.innerHTML = items.map(renderPublicCard).join("");
+    bindPublicCardEvents(box);
+    const hint = $("#publicManageHint");
+    if (hint) {
+      hint.textContent = `仓库 ${data.repo || "-"} · 共 ${data.total || items.length} 条 · 更新 ${data.updated_at_human || "-"}`;
+    }
+  } catch (err) {
+    box.classList.add("empty");
+    box.textContent = `加载失败：${err.message || err}`;
+    toast(`加载公共库失败：${err.message || err}`);
+  }
+}
+
+function renderPublicCard(item) {
+  const checked = state.publicSelected.has(item.id) ? "checked" : "";
+  const tags = (item.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
+  const num = item.seq ? `#${item.seq}` : String(item.id || "").slice(0, 10);
+  return `<article class="v-card" data-id="${esc(item.id)}">
+    <div class="v-main">
+      <div class="v-head">
+        <input type="checkbox" data-public-select="${esc(item.id)}" ${checked} />
+        <div>
+          <div class="v-title">${esc(num)}</div>
+          <div class="v-meta">
+            ${esc(item.size_human || "-")} · ${esc(item.created_at_human || "")}<br/>
+            ID：${esc(item.id)}
+          </div>
+        </div>
+      </div>
+      <div class="v-meta">${esc(item.title || "无标题")}</div>
+      <div class="tags">${tags || `<span class="tag">天菜</span>`}</div>
+      <div class="v-actions">
+        <button type="button" data-public-act="edit" data-id="${esc(item.id)}">编辑</button>
+        <button type="button" data-public-act="import" data-id="${esc(item.id)}">下载到本地</button>
+        <button type="button" class="danger" data-public-act="delete" data-id="${esc(item.id)}">删除</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function bindPublicCardEvents(box) {
+  box.querySelectorAll("[data-public-select]").forEach((input) => {
+    input.addEventListener("change", () => {
+      const id = input.getAttribute("data-public-select");
+      if (input.checked) state.publicSelected.add(id);
+      else state.publicSelected.delete(id);
+      updatePublicButtons();
+    });
+  });
+  box.querySelectorAll("[data-public-act]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const act = btn.getAttribute("data-public-act");
+      const id = btn.getAttribute("data-id");
+      try {
+        if (act === "edit") {
+          openPublicEdit(id);
+        } else if (act === "import") {
+          toast("正在下载到本地…");
+          const result = await bridge.apiPost("public/managed/import", { ids: [id] });
+          toast(
+            `导入完成：成功 ${result.imported || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}`,
+          );
+        } else if (act === "delete") {
+          const ok = await askConfirm(
+            "确定从公共库删除该条目？\n会更新菜单，并尽量删除对应 Release 附件。",
+            "删除公共条目",
+          );
+          if (!ok) return;
+          const result = await bridge.apiPost("public/managed/delete", { ids: [id] });
+          toast(`已删除 ${result.deleted || 0} 条`);
+          state.publicSelected.delete(id);
+          await loadPublicManaged();
+        }
+      } catch (err) {
+        toast(`操作失败：${err.message || err}`);
+      }
+    });
+  });
+}
+
+function openPublicEdit(id) {
+  const item = state.publicItemsById.get(id);
+  if (!item) {
+    toast("未找到该公共条目");
+    return;
+  }
+  $("#publicEditId").value = item.id;
+  $("#publicEditTitle").value = item.title || "";
+  $("#publicEditTags").value = (item.tags || []).join(", ");
+  $("#publicEditDialog").showModal();
+}
+
+async function savePublicEdit(ev) {
+  ev.preventDefault();
+  const id = $("#publicEditId").value;
+  const title = $("#publicEditTitle").value;
+  const tags = $("#publicEditTags").value;
+  try {
+    await bridge.apiPost("public/managed/update", { id, title, tags });
+    $("#publicEditDialog").close();
+    toast("公共库条目已保存");
+    await loadPublicManaged();
+  } catch (err) {
+    toast(`保存失败：${err.message || err}`);
+  }
+}
+
 function updatePager() {
   const pages = Math.max(Math.ceil(state.total / state.pageSize), 1);
   $("#pageInfo").textContent = `第 ${state.page} / ${pages} 页 · 共 ${state.total} 条`;
@@ -593,9 +772,11 @@ function updatePager() {
 
 async function refreshCurrent() {
   state.selected.clear();
+  state.publicSelected.clear();
   if (state.tab === "overview") await loadStats();
   else if (state.tab === "logs") await loadLogs();
   else if (state.tab === "settings") await loadSettings();
+  else if (state.tab === "public") await loadPublicManaged();
   else await loadLibrary();
   try {
     const stats = await bridge.apiGet("stats");
@@ -603,7 +784,9 @@ async function refreshCurrent() {
     $("#subtitle").textContent =
       `在库 ${stats.active_count} · 回收站 ${stats.trash_count} · 公共 ${pub.public_count || 0} · ${stats.total_size_human}`;
     state.canPublish = !!pub.token_configured && !!(pub.repo || "").trim();
+    state.canManagePublic = state.canPublish;
     updateBatchButtons();
+    updatePublicButtons();
   } catch {
     /* ignore */
   }
@@ -904,6 +1087,76 @@ function wire() {
       toast(`永久删除失败：${err.message || err}`);
     }
   });
+
+  $("#btnPublicRefresh")?.addEventListener("click", async () => {
+    if (!state.canManagePublic) {
+      toast("请先在设置页填写 github_token 与 github_repo");
+      return;
+    }
+    toast("正在刷新公共库…");
+    // 先同步公开菜单缓存，再拉可管理列表
+    try {
+      await bridge.apiPost("public/sync", {});
+    } catch {
+      /* 同步失败也继续拉 managed list */
+    }
+    await loadPublicManaged();
+    toast("公共库已刷新");
+  });
+
+  $("#btnPublicSearch")?.addEventListener("click", () => {
+    state.publicFilter = $("#publicSearchQ")?.value || "";
+    loadPublicManaged();
+  });
+  $("#publicSearchQ")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      state.publicFilter = $("#publicSearchQ")?.value || "";
+      loadPublicManaged();
+    }
+  });
+
+  $("#btnPublicImport")?.addEventListener("click", async () => {
+    const ids = [...state.publicSelected];
+    if (!ids.length) {
+      toast("请先勾选公共库视频");
+      return;
+    }
+    toast(`正在下载 ${ids.length} 条到本地…`, 6000);
+    try {
+      const result = await bridge.apiPost("public/managed/import", { ids });
+      toast(
+        `导入完成：成功 ${result.imported || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}`,
+        5000,
+      );
+      if (result.errors?.length) console.warn(result.errors);
+    } catch (err) {
+      toast(`导入失败：${err.message || err}`);
+    }
+  });
+
+  $("#btnPublicDelete")?.addEventListener("click", async () => {
+    const ids = [...state.publicSelected];
+    if (!ids.length) {
+      toast("请先勾选要删除的公共条目");
+      return;
+    }
+    const ok = await askConfirm(
+      `确定从公共库删除 ${ids.length} 条？\n会更新菜单，并尽量删除对应 Release 附件。`,
+      "删除公共条目",
+    );
+    if (!ok) return;
+    try {
+      const result = await bridge.apiPost("public/managed/delete", { ids });
+      toast(`已删除 ${result.deleted || 0} 条`);
+      state.publicSelected.clear();
+      await loadPublicManaged();
+    } catch (err) {
+      toast(`删除失败：${err.message || err}`);
+    }
+  });
+
+  $("#publicEditForm")?.addEventListener("submit", savePublicEdit);
+  $("#publicEditCancel")?.addEventListener("click", () => $("#publicEditDialog").close());
 
   $("#fileInput")?.addEventListener("change", async (e) => {
     const file = e.target.files?.[0];

@@ -3,7 +3,7 @@ Set-Location -LiteralPath $PSScriptRoot
 
 $RemoteUrl = "https://github.com/sxd55/astrbot_plugin_tiancai.git"
 $LogFile = Join-Path $PSScriptRoot "push_log.txt"
-$CommitMsg = "feat(v1.6.1): settings UI with grouped descriptions, select mode, safer repo defaults"
+$CommitMsg = "feat(v1.7.0): public library manage tab (list/edit/delete/import)"
 
 function Write-Log([string]$Message) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
@@ -15,12 +15,8 @@ function Fail([string]$Message) {
     Write-Log "FAILED: $Message"
     Write-Host $Message
     Write-Host ""
-    Write-Host "This is often a GitHub network reset in China."
-    Write-Host "Try again later, or enable VPN/proxy, then rerun push_now.bat"
-    Write-Host ""
-    Write-Host "Manual commands:"
-    Write-Host "  git pull --rebase origin main"
-    Write-Host "  git push -u origin main"
+    Write-Host "Network resets are common. Retry later or use VPN, then rerun."
+    Write-Host "Manual: git pull --rebase origin main && git push -u origin main"
     Read-Host "Press Enter to exit"
     exit 1
 }
@@ -37,7 +33,7 @@ function Invoke-GitRetry([string]$Label, [scriptblock]$Action, [int]$Tries = 5) 
 }
 
 Add-Content -LiteralPath $LogFile -Value "" -Encoding UTF8
-Write-Log "Push start (retry pull/push)"
+Write-Log "Push v1.7.0 start"
 
 $logoSrc = "C:\Users\24122\AppData\Local\Claude-3p\local-agent-mode-sessions\a1678ef5\00000000\a865ea4d\uploads\0ee926631c1b369d3bc3a340898b9012.png"
 $logoDst = Join-Path $PSScriptRoot "logo.png"
@@ -70,7 +66,7 @@ if ($status) {
     Write-Host $status
     git commit -m $CommitMsg
 } else {
-    Write-Log "nothing new to commit (local commit may already exist)"
+    Write-Log "nothing new to commit"
 }
 
 git branch -M main
@@ -85,24 +81,19 @@ if ($remoteNames -contains "origin") {
     git remote add origin $RemoteUrl
 }
 
-# If a previous rebase is in progress, abort only when stuck; otherwise continue carefully
 if (Test-Path ".git/rebase-merge") {
-    Write-Log "detected in-progress rebase; trying git rebase --abort then retry pull"
+    Write-Log "abort stuck rebase"
     git rebase --abort 2>$null
 }
 
 $pullOk = Invoke-GitRetry "git pull --rebase" { git pull --rebase origin main }
-if (-not $pullOk) {
-    Fail "git pull --rebase failed after retries (network). Local commits are kept."
-}
+if (-not $pullOk) { Fail "git pull --rebase failed after retries" }
 
 $pushOk = Invoke-GitRetry "git push" { git push -u origin main }
-if (-not $pushOk) {
-    Fail "git push failed after retries (network). Local commits are kept."
-}
+if (-not $pushOk) { Fail "git push failed after retries" }
 
 Write-Log "SUCCESS"
 Write-Host "Done: $RemoteUrl"
-Write-Host "Version: v1.6.1"
+Write-Host "Version: v1.7.0"
 Read-Host "Press Enter to exit"
 exit 0

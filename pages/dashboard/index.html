@@ -28,6 +28,7 @@
       <nav class="tabs" role="tablist">
         <button type="button" class="tab active" data-tab="overview">总览</button>
         <button type="button" class="tab" data-tab="library">视频库</button>
+        <button type="button" class="tab" data-tab="public">公共库</button>
         <button type="button" class="tab" data-tab="trash">回收站</button>
         <button type="button" class="tab" data-tab="settings">设置</button>
         <button type="button" class="tab" data-tab="logs">日志</button>
@@ -78,6 +79,21 @@
             <span id="pageInfo">—</span>
             <button type="button" class="ghost" id="btnNext">下一页</button>
           </div>
+        </section>
+
+        <section id="panel-public" class="panel">
+          <div class="toolbar">
+            <input id="publicSearchQ" type="search" placeholder="搜索公共库编号 / 标题 / 标签" />
+            <button type="button" class="ghost" id="btnPublicSearch">筛选</button>
+            <button type="button" class="ghost" id="btnPublicRefresh">刷新同步</button>
+            <div class="spacer"></div>
+            <button type="button" class="ghost" id="btnPublicImport" disabled>下载到本地</button>
+            <button type="button" class="danger" id="btnPublicDelete" disabled>删除所选</button>
+          </div>
+          <div id="publicManageHint" class="admin-bar">
+            此栏管理设置里 github_repo 指向的仓库。需填写 github_token 与 github_repo。
+          </div>
+          <div id="publicList" class="video-grid"></div>
         </section>
 
         <section id="panel-trash" class="panel">
@@ -131,6 +147,25 @@
           <div class="dialog-actions">
             <button type="button" class="ghost" id="editCancel">取消</button>
             <button type="submit" class="primary">保存</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="publicEditDialog">
+        <form method="dialog" id="publicEditForm" class="edit-form">
+          <h3>编辑公共库条目</h3>
+          <input type="hidden" id="publicEditId" />
+          <label>
+            标题
+            <input id="publicEditTitle" type="text" maxlength="200" placeholder="标题" />
+          </label>
+          <label>
+            标签（逗号分隔）
+            <input id="publicEditTags" type="text" placeholder="天菜, 整活" />
+          </label>
+          <div class="dialog-actions">
+            <button type="button" class="ghost" id="publicEditCancel">取消</button>
+            <button type="submit" class="primary">保存到 GitHub</button>
           </div>
         </form>
       </dialog>

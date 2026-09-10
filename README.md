@@ -4,15 +4,13 @@
 
 仓库：https://github.com/sxd55/astrbot_plugin_tiancai
 
-## v1.6.1 要点
+## v1.7.0 要点
 
-- 设置面板：分组展示，**每一项都有精确说明**
-- 抽取模式改为**下拉选择**
-- 公共菜单 URL **留空 = 官方默认菜单**
-- `github_repo`：**发布时必须手填你自己的仓库**（读取官方菜单不依赖它）
+- 新增管理台 **「公共库」** 栏（在视频库旁边）
+- 可用 `github_token` + `github_repo` 管理自己的公共库：浏览、刷新、编辑标题/标签、删除、下载到本地
+- 设置面板分组说明、抽取模式下拉、菜单 URL 留空用官方默认
 - 公共视频下载后默认自动导入本地库
-- 去掉维护口令；配置了自己的 Token + 仓库即可发布
-- GitHub 代理留空默认 `https://gh-proxy.com/`
+- 发布仍需手填自己的 `github_repo`（读取官方菜单不依赖它）
 - 设置说明：[`docs/SETTINGS.md`](./docs/SETTINGS.md)
 - 建库教程：[`docs/SETUP_PUBLIC_REPO.md`](./docs/SETUP_PUBLIC_REPO.md)
 
