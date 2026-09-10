@@ -6,7 +6,7 @@
     "default": "videos"
   },
   "max_videos": {
-    "description": "视频库最大数量",
+    "description": "视频库最大数量（不含回收站）",
     "type": "int",
     "hint": "超过上限时拒绝继续入库，设为 0 表示不限制",
     "default": 0
@@ -16,5 +16,35 @@
     "type": "bool",
     "hint": "关闭后会根据原消息 ID 去重",
     "default": false
+  },
+  "collect_whitelist": {
+    "description": "可入库的 QQ 白名单",
+    "type": "list",
+    "hint": "AstrBot 管理员始终可入库；此处填写额外允许「收进天菜」的 QQ 号",
+    "default": []
+  },
+  "cooldown_seconds": {
+    "description": "看看天菜冷却秒数",
+    "type": "int",
+    "hint": "同一用户两次「看看天菜」的最短间隔，0 表示不限制",
+    "default": 15
+  },
+  "recent_penalty_count": {
+    "description": "降权少重复：近期条数",
+    "type": "int",
+    "hint": "最近发出的 N 条天菜会降低再次抽中的权重",
+    "default": 8
+  },
+  "recent_penalty_weight": {
+    "description": "降权少重复：近期权重",
+    "type": "float",
+    "hint": "近期已发过的视频权重，越小越不容易重复。普通视频权重为 1.0",
+    "default": 0.15
+  },
+  "pinned_weight": {
+    "description": "置顶天菜权重",
+    "type": "float",
+    "hint": "pinned=true 的视频基础权重（后续置顶指令会用到）",
+    "default": 3.0
   }
 }
