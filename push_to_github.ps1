@@ -64,11 +64,10 @@ try {
 
     git add .
     $status = git status --porcelain
-    $headExists = $true
-    try {
-        git rev-parse --verify HEAD | Out-Null
-    } catch {
-        $headExists = $false
+    $headExists = $false
+    git rev-parse --verify HEAD 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        $headExists = $true
     }
 
     if ($status -or (-not $headExists)) {
@@ -124,16 +123,27 @@ try {
     Write-Host ""
     Read-Host "Press Enter after the empty repo exists"
 
-    git remote remove origin 2>$null
-    git remote add origin $RemoteUrl
-    if ($LASTEXITCODE -ne 0) {
-        throw "git remote add failed"
+    $existingRemote = ""
+    try { $existingRemote = (git remote get-url origin 2>$null) } catch { $existingRemote = "" }
+
+    if ($existingRemote) {
+        Write-Log "update existing origin -> $RemoteUrl"
+        git remote set-url origin $RemoteUrl
+        if ($LASTEXITCODE -ne 0) {
+            throw "git remote set-url failed"
+        }
+    } else {
+        Write-Log "add origin -> $RemoteUrl"
+        git remote add origin $RemoteUrl
+        if ($LASTEXITCODE -ne 0) {
+            throw "git remote add failed"
+        }
     }
 
     Write-Log "git push -u origin main"
-    git push -u origin main
+    git -c core.askPass= push -u origin main
     if ($LASTEXITCODE -ne 0) {
-        throw "git push failed with exit code $LASTEXITCODE"
+        throw "git push failed with exit code $LASTEXITCODE. If auth failed, create a GitHub Personal Access Token with repo scope and use it as password."
     }
 
     Write-Log "SUCCESS via git"
