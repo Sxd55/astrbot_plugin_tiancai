@@ -1,16 +1,14 @@
 """AstrBot 天菜视频库插件。
 
-Batch 1：
-- 索引升级到 v2（备注/标签/软删除/播放统计）
-- 入库权限：管理员 + QQ 白名单
-- 看看天菜：冷却 + 降权少重复
-- 新指令：删除天菜 / 天菜详情 / 天菜帮助
+Batch 1：索引 v2、权限白名单、冷却、软删除指令、降权随机
+Batch 2：WebUI 管理台（总览 / 列表 / 回收站 / 上传下载）
 """
 
 from __future__ import annotations
 
 import json
 import random
+import re
 import shutil
 import time
 import uuid
@@ -21,6 +19,13 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import File, Reply, Video
 from astrbot.api.star import Context, Star, register
+from astrbot.api.web import (
+    PluginUploadFile,
+    error_response,
+    file_response,
+    json_response,
+    request,
+)
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 PLUGIN_NAME = "astrbot_plugin_tiancai"
@@ -28,6 +33,7 @@ INDEX_FILENAME = "index.json"
 LOG_FILENAME = "audit.log"
 INDEX_VERSION = 2
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv"}
+SAFE_ID_RE = re.compile(r"^[a-fA-F0-9]{8,64}$")
 
 
 def _now() -> int:
@@ -55,7 +61,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.1.0",
+    "1.2.0",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -71,6 +77,27 @@ class TiancaiPlugin(Star):
         self.videos_dir.mkdir(parents=True, exist_ok=True)
         self._cooldowns: dict[str, float] = {}
         self._ensure_index()
+        self._register_web_apis()
+
+    def _register_web_apis(self) -> None:
+        apis = [
+            ("stats", self.api_stats, ["GET"], "天菜库总览统计"),
+            ("videos", self.api_list_videos, ["GET"], "天菜列表"),
+            ("videos/delete", self.api_delete_videos, ["POST"], "软删除天菜"),
+            ("videos/restore", self.api_restore_videos, ["POST"], "恢复天菜"),
+            ("videos/purge", self.api_purge_videos, ["POST"], "永久删除天菜"),
+            ("videos/update", self.api_update_video, ["POST"], "更新备注/标签/置顶"),
+            ("videos/upload", self.api_upload_video, ["POST"], "上传视频入库"),
+            ("videos/download", self.api_download_video, ["GET"], "下载视频文件"),
+            ("logs", self.api_logs, ["GET"], "审计日志"),
+        ]
+        for path, handler, methods, desc in apis:
+            self.context.register_web_api(
+                f"/{PLUGIN_NAME}/{path}",
+                handler,
+                methods,
+                desc,
+            )
 
     async def initialize(self):
         index = self._load_index()
@@ -82,6 +109,408 @@ class TiancaiPlugin(Star):
             len(active),
             len(index.get("videos", [])) - len(active),
         )
+
+    # ------------------------------------------------------------------
+    # Web API（管理台）
+    # ------------------------------------------------------------------
+
+    async def api_stats(self):
+        index = self._load_index()
+        videos = [v for v in index.get("videos", []) if isinstance(v, dict)]
+        active = [v for v in videos if v.get("deleted_at") is None]
+        trash = [v for v in videos if v.get("deleted_at") is not None]
+        total_size = 0
+        missing = 0
+        for item in active:
+            path = self.videos_dir / str(item.get("filename", ""))
+            if path.is_file():
+                try:
+                    total_size += path.stat().st_size
+                except OSError:
+                    pass
+            else:
+                missing += 1
+
+        day_start = _now() - (_now() % 86400)
+        collected_today = sum(
+            1 for v in active if int(v.get("saved_at") or 0) >= day_start
+        )
+        played_today = sum(
+            1 for v in active if int(v.get("last_played_at") or 0) >= day_start
+        )
+
+        recent = sorted(
+            videos,
+            key=lambda x: int(x.get("saved_at") or 0),
+            reverse=True,
+        )[:8]
+        recent_play = sorted(
+            [v for v in active if v.get("last_played_at")],
+            key=lambda x: int(x.get("last_played_at") or 0),
+            reverse=True,
+        )[:8]
+
+        return json_response(
+            {
+                "version": index.get("version", INDEX_VERSION),
+                "active_count": len(active),
+                "trash_count": len(trash),
+                "missing_count": missing,
+                "total_size": total_size,
+                "total_size_human": self._fmt_size(total_size),
+                "collected_today": collected_today,
+                "played_today": played_today,
+                "videos_dir": str(self.videos_dir),
+                "cooldown_seconds": int(self.config.get("cooldown_seconds", 15) or 0),
+                "max_videos": int(self.config.get("max_videos", 0) or 0),
+                "recent_collected": [self._public_item(v) for v in recent],
+                "recent_played": [self._public_item(v) for v in recent_play],
+            }
+        )
+
+    async def api_list_videos(self):
+        index = self._load_index()
+        scope = str(request.query.get("scope", "active") or "active").lower()
+        q = str(request.query.get("q", "") or "").strip().lower()
+        tag = str(request.query.get("tag", "") or "").strip().lower()
+        sort = str(request.query.get("sort", "saved_at") or "saved_at")
+        order = str(request.query.get("order", "desc") or "desc").lower()
+        try:
+            page = max(int(request.query.get("page", 1) or 1), 1)
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            page_size = int(request.query.get("page_size", 20) or 20)
+        except (TypeError, ValueError):
+            page_size = 20
+        page_size = min(max(page_size, 1), 100)
+
+        items = [v for v in index.get("videos", []) if isinstance(v, dict)]
+        if scope == "trash":
+            items = [v for v in items if v.get("deleted_at") is not None]
+        elif scope == "all":
+            pass
+        else:
+            items = [v for v in items if v.get("deleted_at") is None]
+
+        if q:
+            def match(v: dict[str, Any]) -> bool:
+                blob = " ".join(
+                    [
+                        str(v.get("id") or ""),
+                        str(v.get("note") or ""),
+                        str(v.get("collector_name") or ""),
+                        str(v.get("collector_id") or ""),
+                        str(v.get("source_group_id") or ""),
+                        " ".join(str(t) for t in (v.get("tags") or [])),
+                    ]
+                ).lower()
+                return q in blob
+
+            items = [v for v in items if match(v)]
+
+        if tag:
+            items = [
+                v
+                for v in items
+                if any(str(t).lower() == tag for t in (v.get("tags") or []))
+            ]
+
+        reverse = order != "asc"
+        if sort == "size":
+            items.sort(key=lambda x: int(x.get("size") or 0), reverse=reverse)
+        elif sort == "play_count":
+            items.sort(key=lambda x: int(x.get("play_count") or 0), reverse=reverse)
+        elif sort == "last_played_at":
+            items.sort(
+                key=lambda x: int(x.get("last_played_at") or 0), reverse=reverse
+            )
+        else:
+            items.sort(key=lambda x: int(x.get("saved_at") or 0), reverse=reverse)
+
+        total = len(items)
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_items = items[start:end]
+
+        return json_response(
+            {
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+                "items": [self._public_item(v) for v in page_items],
+            }
+        )
+
+    async def api_delete_videos(self):
+        payload = await request.json(default={})
+        ids = self._normalize_ids(payload.get("ids"))
+        if not ids:
+            return error_response("ids required", status_code=400)
+
+        index = self._load_index()
+        moved = 0
+        for item in index.get("videos", []):
+            if str(item.get("id")) in ids and item.get("deleted_at") is None:
+                item["deleted_at"] = _now()
+                item["deleted_by"] = f"web:{request.username or 'dashboard'}"
+                moved += 1
+                self._audit(
+                    "web_soft_delete",
+                    video_id=str(item.get("id")),
+                    detail=f"by={request.username}",
+                )
+        self._save_index(index)
+        return json_response({"moved": moved})
+
+    async def api_restore_videos(self):
+        payload = await request.json(default={})
+        ids = self._normalize_ids(payload.get("ids"))
+        if not ids:
+            return error_response("ids required", status_code=400)
+
+        index = self._load_index()
+        restored = 0
+        for item in index.get("videos", []):
+            if str(item.get("id")) in ids and item.get("deleted_at") is not None:
+                path = self.videos_dir / str(item.get("filename", ""))
+                if not path.is_file():
+                    continue
+                item["deleted_at"] = None
+                item["deleted_by"] = None
+                restored += 1
+                self._audit(
+                    "web_restore",
+                    video_id=str(item.get("id")),
+                    detail=f"by={request.username}",
+                )
+        self._save_index(index)
+        return json_response({"restored": restored})
+
+    async def api_purge_videos(self):
+        payload = await request.json(default={})
+        ids = self._normalize_ids(payload.get("ids"))
+        if not ids:
+            return error_response("ids required", status_code=400)
+
+        index = self._load_index()
+        kept: list[dict[str, Any]] = []
+        purged = 0
+        for item in index.get("videos", []):
+            vid = str(item.get("id") or "")
+            if vid in ids and item.get("deleted_at") is not None:
+                path = self.videos_dir / str(item.get("filename", ""))
+                if path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        logger.exception("永久删除文件失败: %s", path)
+                purged += 1
+                self._audit(
+                    "web_purge",
+                    video_id=vid,
+                    detail=f"by={request.username}",
+                )
+            else:
+                kept.append(item)
+        index["videos"] = kept
+        # 清理 recent
+        index["recent_sent_ids"] = [
+            x for x in index.get("recent_sent_ids", []) if str(x) not in ids
+        ]
+        self._save_index(index)
+        return json_response({"purged": purged})
+
+    async def api_update_video(self):
+        payload = await request.json(default={})
+        video_id = str(payload.get("id") or "").strip()
+        if not video_id or not SAFE_ID_RE.match(video_id):
+            return error_response("invalid id", status_code=400)
+
+        index = self._load_index()
+        target = None
+        for item in index.get("videos", []):
+            if str(item.get("id")) == video_id:
+                target = item
+                break
+        if target is None:
+            return error_response("not found", status_code=404)
+
+        if "note" in payload:
+            note = str(payload.get("note") or "")
+            target["note"] = note[:200]
+        if "tags" in payload:
+            tags_raw = payload.get("tags")
+            tags: list[str] = []
+            if isinstance(tags_raw, list):
+                for t in tags_raw:
+                    text = str(t).strip()
+                    if text and text not in tags:
+                        tags.append(text[:32])
+            elif isinstance(tags_raw, str):
+                for part in re.split(r"[,，\s]+", tags_raw):
+                    text = part.strip()
+                    if text and text not in tags:
+                        tags.append(text[:32])
+            target["tags"] = tags[:20]
+        if "pinned" in payload:
+            target["pinned"] = bool(payload.get("pinned"))
+
+        self._save_index(index)
+        self._audit(
+            "web_update",
+            video_id=video_id,
+            detail=f"by={request.username}",
+        )
+        return json_response({"item": self._public_item(target)})
+
+    async def api_upload_video(self):
+        files = await request.files()
+        upload: PluginUploadFile | None = files.get("file")
+        if not isinstance(upload, PluginUploadFile):
+            return error_response("missing file", status_code=400)
+
+        filename = Path(upload.filename or "upload.mp4").name
+        suffix = Path(filename).suffix.lower() or ".mp4"
+        if suffix not in VIDEO_SUFFIXES:
+            return error_response(
+                f"unsupported type {suffix}, allow: {', '.join(sorted(VIDEO_SUFFIXES))}",
+                status_code=400,
+            )
+
+        index = self._load_index()
+        max_videos = int(self.config.get("max_videos", 0) or 0)
+        active_count = len(self._active_videos(index))
+        if max_videos > 0 and active_count >= max_videos:
+            return error_response(f"library full (max {max_videos})", status_code=400)
+
+        video_id = uuid.uuid4().hex
+        dest = self.videos_dir / f"{video_id}{suffix}"
+        try:
+            await upload.save(dest)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("上传保存失败")
+            return error_response(f"save failed: {exc}", status_code=500)
+
+        size = dest.stat().st_size if dest.is_file() else 0
+        record = self._new_record(
+            video_id=video_id,
+            filename=dest.name,
+            size=size,
+            source_message_id="",
+            source_group_id="",
+            collector_id=f"web:{request.username or 'dashboard'}",
+            collector_name=str(request.username or "dashboard"),
+        )
+        record["note"] = f"WebUI 上传 · {filename}"[:200]
+        index.setdefault("videos", []).append(record)
+        self._save_index(index)
+        self._audit(
+            "web_upload",
+            video_id=video_id,
+            detail=f"name={filename};size={size};by={request.username}",
+        )
+        return json_response({"item": self._public_item(record)})
+
+    async def api_download_video(self):
+        video_id = str(request.query.get("id", "") or "").strip()
+        if not video_id or not SAFE_ID_RE.match(video_id):
+            return error_response("invalid id", status_code=400)
+
+        index = self._load_index()
+        target = None
+        for item in index.get("videos", []):
+            if str(item.get("id")) == video_id:
+                target = item
+                break
+        if target is None:
+            return error_response("not found", status_code=404)
+
+        path = self.videos_dir / str(target.get("filename", ""))
+        if not path.is_file():
+            return error_response("file missing", status_code=404)
+
+        name = f"tiancai_{video_id[:8]}{path.suffix or '.mp4'}"
+        return file_response(path, filename=name, content_type="video/mp4")
+
+    async def api_logs(self):
+        try:
+            limit = int(request.query.get("limit", 50) or 50)
+        except (TypeError, ValueError):
+            limit = 50
+        limit = min(max(limit, 1), 200)
+
+        if not self.log_path.exists():
+            return json_response({"items": []})
+
+        try:
+            lines = self.log_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return error_response("read log failed", status_code=500)
+
+        items = []
+        for line in reversed(lines[-limit:]):
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            items.append(
+                {
+                    "raw": line,
+                    "ts": parts[0] if parts else "",
+                    "action": parts[1] if len(parts) > 1 else "",
+                    "user": parts[2] if len(parts) > 2 else "",
+                    "group": parts[3] if len(parts) > 3 else "",
+                    "video": parts[4] if len(parts) > 4 else "",
+                    "detail": parts[5] if len(parts) > 5 else "",
+                }
+            )
+        return json_response({"items": items})
+
+    def _normalize_ids(self, raw: Any) -> set[str]:
+        ids: set[str] = set()
+        if isinstance(raw, str):
+            raw = [raw]
+        if not isinstance(raw, list):
+            return ids
+        for item in raw:
+            text = str(item).strip()
+            if SAFE_ID_RE.match(text):
+                ids.add(text)
+        return ids
+
+    def _public_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        path = self.videos_dir / str(item.get("filename", ""))
+        exists = path.is_file()
+        size = int(item.get("size") or 0)
+        if exists:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                pass
+        return {
+            "id": item.get("id"),
+            "id_short": str(item.get("id") or "")[:8],
+            "filename": item.get("filename"),
+            "saved_at": item.get("saved_at"),
+            "saved_at_human": self._fmt_time(item.get("saved_at")),
+            "source_message_id": item.get("source_message_id") or "",
+            "source_group_id": item.get("source_group_id") or "",
+            "collector_id": item.get("collector_id") or "",
+            "collector_name": item.get("collector_name") or "",
+            "size": size,
+            "size_human": self._fmt_size(size),
+            "note": item.get("note") or "",
+            "tags": item.get("tags") or [],
+            "play_count": int(item.get("play_count") or 0),
+            "last_played_at": item.get("last_played_at"),
+            "last_played_at_human": self._fmt_time(item.get("last_played_at")) or "",
+            "pinned": bool(item.get("pinned")),
+            "deleted_at": item.get("deleted_at"),
+            "deleted_at_human": self._fmt_time(item.get("deleted_at")) or "",
+            "deleted_by": item.get("deleted_by") or "",
+            "file_exists": exists,
+            "in_trash": item.get("deleted_at") is not None,
+        }
 
     # ------------------------------------------------------------------
     # 指令
@@ -259,7 +688,7 @@ class TiancaiPlugin(Star):
         self._audit("soft_delete", event, video_id=str(item["id"]))
         yield event.plain_result(
             f"已将天菜移入回收站。\n编号：{str(item['id'])[:8]}\n"
-            "（后续可在 WebUI 回收站恢复；永久删除能力将在管理台提供）"
+            "可在 WebUI「天菜管理台」回收站恢复或永久删除。"
         )
 
     @filter.command("天菜详情", alias={"天菜信息"})
@@ -322,7 +751,7 @@ class TiancaiPlugin(Star):
             "· 清空天菜：管理员将全部在库移入回收站\n"
             "· 天菜帮助：查看本说明\n"
             "\n"
-            "后续批次还将提供：标签/搜索/置顶/连抽/排行、WebUI 管理台、定时推送等。"
+            "WebUI：插件详情 → 天菜管理台（浏览/上传/回收站）"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -340,7 +769,7 @@ class TiancaiPlugin(Star):
         self._save_index(index)
         self._audit("soft_clear", event, detail=f"moved={moved}")
         yield event.plain_result(
-            f"已将 {moved} 条天菜移入回收站（文件仍保留，可后续在管理台恢复/永久删除）。"
+            f"已将 {moved} 条天菜移入回收站（可在 WebUI 管理台恢复/永久删除）。"
         )
 
     # ------------------------------------------------------------------
@@ -358,7 +787,7 @@ class TiancaiPlugin(Star):
         if event.is_admin():
             return True
         sender = str(event.get_sender_id() or "")
-        return sender and sender == str(item.get("collector_id") or "")
+        return bool(sender) and sender == str(item.get("collector_id") or "")
 
     def _check_cooldown(self, event: AstrMessageEvent) -> str | None:
         seconds = int(self.config.get("cooldown_seconds", 15) or 0)
@@ -405,7 +834,6 @@ class TiancaiPlugin(Star):
     async def _extract_video_from_event(
         self, event: AstrMessageEvent
     ) -> tuple[Video | None, dict[str, Any]]:
-        """优先从被回复消息中找视频，其次从当前消息找。"""
         messages = event.get_messages() or []
 
         for comp in messages:
@@ -456,7 +884,6 @@ class TiancaiPlugin(Star):
     async def _fetch_video_by_message_id(
         self, event: AstrMessageEvent, message_id: str
     ) -> Video | None:
-        """尝试通过 aiocqhttp / OneBot 拉取被引用消息中的视频。"""
         if not message_id:
             return None
 
@@ -578,7 +1005,6 @@ class TiancaiPlugin(Star):
         if not self.index_path.exists():
             self._save_index(self._empty_index())
             return
-        # 触发一次迁移
         self._load_index()
 
     def _empty_index(self) -> dict[str, Any]:
@@ -668,7 +1094,6 @@ class TiancaiPlugin(Star):
         ]
 
     def _existing_active_videos(self, index: dict[str, Any]) -> list[dict[str, Any]]:
-        """在库且文件仍存在的条目；顺带清理索引中丢失文件的活动项到缺失状态日志。"""
         existing: list[dict[str, Any]] = []
         changed = False
         for item in list(index.get("videos", [])):
@@ -678,7 +1103,6 @@ class TiancaiPlugin(Star):
             if path.is_file():
                 existing.append(item)
             else:
-                # 文件丢失：标记进回收站，避免反复抽到
                 item["deleted_at"] = _now()
                 item["deleted_by"] = "system:missing_file"
                 changed = True

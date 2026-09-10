@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>天菜管理台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div class="brand">
+          <div class="mark" aria-hidden="true">菜</div>
+          <div>
+            <h1>天菜管理台</h1>
+            <p class="sub" id="subtitle">全局视频库 · 加载中…</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <label class="upload-btn">
+            <input id="fileInput" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.flv" hidden />
+            上传视频
+          </label>
+          <button type="button" class="ghost" id="btnRefresh">刷新</button>
+        </div>
+      </header>
+
+      <nav class="tabs" role="tablist">
+        <button type="button" class="tab active" data-tab="overview">总览</button>
+        <button type="button" class="tab" data-tab="library">视频库</button>
+        <button type="button" class="tab" data-tab="trash">回收站</button>
+        <button type="button" class="tab" data-tab="logs">日志</button>
+      </nav>
+
+      <main>
+        <section id="panel-overview" class="panel active">
+          <div class="stats" id="statCards"></div>
+          <div class="split">
+            <div class="card">
+              <h2>最近入库</h2>
+              <div id="recentCollected" class="mini-list empty">暂无</div>
+            </div>
+            <div class="card">
+              <h2>最近抽出</h2>
+              <div id="recentPlayed" class="mini-list empty">暂无</div>
+            </div>
+          </div>
+          <div class="card path-card">
+            <h2>存储路径</h2>
+            <code id="videosDir">—</code>
+          </div>
+        </section>
+
+        <section id="panel-library" class="panel">
+          <div class="toolbar">
+            <input id="searchQ" type="search" placeholder="搜索编号 / 备注 / 收藏人 / 标签" />
+            <select id="sortBy">
+              <option value="saved_at">按入库时间</option>
+              <option value="play_count">按抽中次数</option>
+              <option value="size">按大小</option>
+              <option value="last_played_at">按最近抽出</option>
+            </select>
+            <button type="button" class="ghost" id="btnSearch">筛选</button>
+            <div class="spacer"></div>
+            <button type="button" class="danger" id="btnBatchDelete" disabled>移入回收站</button>
+          </div>
+          <div id="libraryList" class="video-grid"></div>
+          <div class="pager">
+            <button type="button" class="ghost" id="btnPrev">上一页</button>
+            <span id="pageInfo">—</span>
+            <button type="button" class="ghost" id="btnNext">下一页</button>
+          </div>
+        </section>
+
+        <section id="panel-trash" class="panel">
+          <div class="toolbar">
+            <p class="hint">回收站中的条目可恢复；永久删除不可撤销。</p>
+            <div class="spacer"></div>
+            <button type="button" class="ghost" id="btnBatchRestore" disabled>恢复</button>
+            <button type="button" class="danger" id="btnBatchPurge" disabled>永久删除</button>
+          </div>
+          <div id="trashList" class="video-grid"></div>
+        </section>
+
+        <section id="panel-logs" class="panel">
+          <div class="card">
+            <h2>审计日志</h2>
+            <div id="logList" class="log-list empty">暂无日志</div>
+          </div>
+        </section>
+      </main>
+
+      <div id="toast" class="toast" hidden></div>
+
+      <dialog id="editDialog">
+        <form method="dialog" id="editForm" class="edit-form">
+          <h3>编辑天菜</h3>
+          <input type="hidden" id="editId" />
+          <label>
+            备注
+            <input id="editNote" type="text" maxlength="200" placeholder="一句话备注" />
+          </label>
+          <label>
+            标签（逗号分隔）
+            <input id="editTags" type="text" placeholder="整活, 名场面" />
+          </label>
+          <label class="check">
+            <input id="editPinned" type="checkbox" />
+            置顶（提高「看看天菜」权重）
+          </label>
+          <div class="dialog-actions">
+            <button type="button" class="ghost" id="editCancel">取消</button>
+            <button type="submit" class="primary">保存</button>
+          </div>
+        </form>
+      </dialog>
+    </div>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
