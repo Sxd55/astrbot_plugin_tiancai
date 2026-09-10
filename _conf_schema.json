@@ -50,13 +50,13 @@
   "public_enabled": {
     "description": "启用公共天菜源",
     "type": "bool",
-    "hint": "开启后会定期同步 GitHub 等公开菜单；用户只能下载，不能上传到公共库",
+    "hint": "开启后会定期同步公开菜单；普通用户只能下载，不能上传",
     "default": false
   },
   "public_index_url": {
     "description": "公共菜单 URL",
     "type": "string",
-    "hint": "例如 https://raw.githubusercontent.com/<user>/tiancai-public/main/public_index.json",
+    "hint": "例如 https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/main/public/public_index.json",
     "default": ""
   },
   "library_mode": {
@@ -69,7 +69,7 @@
   "public_sync_hours": {
     "description": "公共菜单同步间隔（小时）",
     "type": "float",
-    "hint": "小于等于 0 表示每次看看天菜前都尝试同步（仍会有短冷却）",
+    "hint": "小于等于 0 表示每次看看天菜前都尝试同步",
     "default": 12
   },
   "public_cache_enabled": {
@@ -83,5 +83,55 @@
     "type": "float",
     "hint": "1.0 表示与本地同等；小于 1 更常抽本地，大于 1 更常抽公共",
     "default": 1.0
+  },
+  "github_proxy": {
+    "description": "GitHub 代理前缀",
+    "type": "string",
+    "hint": "拉取 raw/release 时拼在原 URL 前。留空则使用默认 https://gh-proxy.com/",
+    "default": ""
+  },
+  "github_token": {
+    "description": "GitHub Token（仅维护者）",
+    "type": "string",
+    "secret": true,
+    "hint": "用于发布公共库。需要 repo 权限的 PAT。不要提交到公开仓库。",
+    "default": ""
+  },
+  "admin_passphrase": {
+    "description": "管理口令（仅维护者）",
+    "type": "string",
+    "secret": true,
+    "hint": "WebUI 解锁「发布到公共库」按钮。只存在你的服务器配置中，不要写进开源代码。",
+    "default": ""
+  },
+  "github_repo": {
+    "description": "公共库仓库 owner/repo",
+    "type": "string",
+    "hint": "例如 sxd55/astrbot_plugin_tiancai 或 sxd55/tiancai-public",
+    "default": "sxd55/astrbot_plugin_tiancai"
+  },
+  "github_branch": {
+    "description": "公共菜单所在分支",
+    "type": "string",
+    "hint": "更新 public_index.json 时使用",
+    "default": "main"
+  },
+  "github_index_path": {
+    "description": "仓库内菜单路径",
+    "type": "string",
+    "hint": "例如 public/public_index.json",
+    "default": "public/public_index.json"
+  },
+  "github_release_tag": {
+    "description": "视频 Release 标签名",
+    "type": "string",
+    "hint": "视频作为 Release 附件上传，避免塞进 git 历史",
+    "default": "tiancai-videos"
+  },
+  "max_public_upload_mb": {
+    "description": "单条上传公共库大小上限（MB）",
+    "type": "int",
+    "hint": "GitHub 单文件硬顶 100MB，建议不超过 95",
+    "default": 95
   }
 }

@@ -9,6 +9,8 @@ const state = {
   selected: new Set(),
   stats: null,
   itemsById: new Map(),
+  adminUnlocked: false,
+  canPublish: false,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -316,9 +318,43 @@ function updateBatchButtons() {
   const del = $("#btnBatchDelete");
   const restore = $("#btnBatchRestore");
   const purge = $("#btnBatchPurge");
+  const publish = $("#btnPublishGithub");
   if (del) del.disabled = n === 0 || state.scope !== "active";
   if (restore) restore.disabled = n === 0 || state.scope !== "trash";
   if (purge) purge.disabled = n === 0 || state.scope !== "trash";
+  if (publish) {
+    publish.hidden = !state.adminUnlocked;
+    publish.disabled = !state.canPublish || n === 0 || state.scope !== "active";
+  }
+}
+
+async function refreshAdminStatus() {
+  try {
+    const st = await bridge.apiGet("admin/status");
+    state.adminUnlocked = !!st.unlocked;
+    state.canPublish = !!st.can_publish;
+    const bar = $("#adminBar");
+    const text = $("#adminBarText");
+    const lockBtn = $("#btnAdminLock");
+    const publish = $("#btnPublishGithub");
+    if (bar) bar.hidden = !state.adminUnlocked;
+    if (lockBtn) lockBtn.hidden = !state.adminUnlocked;
+    if (publish) publish.hidden = !state.adminUnlocked;
+    if (text) {
+      if (!st.passphrase_configured) {
+        text.textContent = "未配置 admin_passphrase，无法解锁维护面板";
+      } else if (!st.token_configured) {
+        text.textContent = `已解锁（${st.unlock_remain_sec || 0}s）· 未配置 github_token，无法发布`;
+      } else if (state.adminUnlocked) {
+        text.textContent = `维护面板已解锁（剩余 ${st.unlock_remain_sec || 0}s）· 可发布到 ${st.repo || "仓库"}`;
+      } else {
+        text.textContent = "维护面板未解锁";
+      }
+    }
+    updateBatchButtons();
+  } catch (err) {
+    console.warn("admin status failed", err);
+  }
 }
 
 function updatePager() {
@@ -480,6 +516,71 @@ function wire() {
     }
   });
 
+  $("#btnPublishGithub")?.addEventListener("click", async () => {
+    const ids = [...state.selected];
+    if (!ids.length) return;
+    if (!state.canPublish) {
+      toast("未解锁或未配置 Token");
+      return;
+    }
+    if (
+      !confirm(
+        `将选中的 ${ids.length} 条发布到 GitHub 公共库？\n视频会上传到 Release，并更新 public_index.json。`,
+      )
+    ) {
+      return;
+    }
+    toast("正在发布到公共库…");
+    try {
+      const result = await bridge.apiPost("public/publish", { ids });
+      toast(
+        `发布完成：成功 ${result.published || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}`,
+        4000,
+      );
+      if (result.errors?.length) {
+        console.warn("publish errors", result.errors);
+      }
+      await refreshCurrent();
+      await refreshAdminStatus();
+    } catch (err) {
+      toast(`发布失败：${err.message || err}`);
+    }
+  });
+
+  $("#btnAdminEntry")?.addEventListener("click", async () => {
+    await refreshAdminStatus();
+    if (state.adminUnlocked) {
+      toast("维护面板已解锁");
+      return;
+    }
+    $("#adminPass").value = "";
+    $("#adminDialog").showModal();
+  });
+
+  $("#adminCancel")?.addEventListener("click", () => $("#adminDialog").close());
+  $("#adminForm")?.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const passphrase = $("#adminPass").value || "";
+    try {
+      await bridge.apiPost("admin/unlock", { passphrase });
+      $("#adminDialog").close();
+      toast("维护面板已解锁");
+      await refreshAdminStatus();
+    } catch (err) {
+      toast(`解锁失败：${err.message || err}`);
+    }
+  });
+
+  $("#btnAdminLock")?.addEventListener("click", async () => {
+    try {
+      await bridge.apiPost("admin/lock", {});
+      toast("已锁定维护面板");
+      await refreshAdminStatus();
+    } catch (err) {
+      toast(`锁定失败：${err.message || err}`);
+    }
+  });
+
   $("#btnBatchRestore")?.addEventListener("click", async () => {
     const ids = [...state.selected];
     if (!ids.length) return;
@@ -528,6 +629,7 @@ async function boot() {
   } catch (err) {
     console.warn("bridge ready failed", err);
   }
+  await refreshAdminStatus();
   await loadStats();
 }
 

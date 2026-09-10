@@ -4,12 +4,15 @@ Batch 1：索引 v2、权限白名单、冷却、软删除指令、降权随机
 Batch 2：WebUI 管理台（总览 / 列表 / 回收站 / 上传下载）
 Batch 3：顺序编号、默认标签「天菜」、卡片内视频预览
 Batch 4：公共天菜源（GitHub index + URL 视频，只读同步/缓存/混合抽取）
+Batch 5：可配置口令解锁发布、GitHub Token 上传 Release、代理拉取
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import mimetypes
 import random
@@ -19,7 +22,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
 from astrbot.api import AstrBotConfig, logger
@@ -48,6 +52,9 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv"}
 SAFE_ID_RE = re.compile(r"^[a-fA-F0-9]{8,64}$")
 SAFE_CODE_RE = re.compile(r"^[0-9a-fA-F]{1,64}$")
 PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
+DEFAULT_GITHUB_PROXY = "https://gh-proxy.com/"
+ADMIN_UNLOCK_SECONDS = 30 * 60
+GITHUB_API = "https://api.github.com"
 
 
 def _now() -> int:
@@ -75,7 +82,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.4.0",
+    "1.5.0",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -95,6 +102,8 @@ class TiancaiPlugin(Star):
         self.public_cache_dir.mkdir(parents=True, exist_ok=True)
         self._cooldowns: dict[str, float] = {}
         self._public_sync_lock = asyncio.Lock()
+        self._publish_lock = asyncio.Lock()
+        self._admin_unlock_until: dict[str, float] = {}
         self._ensure_index()
         self._register_web_apis()
 
@@ -112,6 +121,10 @@ class TiancaiPlugin(Star):
             ("logs", self.api_logs, ["GET"], "审计日志"),
             ("public/status", self.api_public_status, ["GET"], "公共源状态"),
             ("public/sync", self.api_public_sync, ["POST"], "手动同步公共菜单"),
+            ("admin/status", self.api_admin_status, ["GET"], "维护者面板状态"),
+            ("admin/unlock", self.api_admin_unlock, ["POST"], "口令解锁维护面板"),
+            ("admin/lock", self.api_admin_lock, ["POST"], "锁定维护面板"),
+            ("public/publish", self.api_public_publish, ["POST"], "批量发布到公共库"),
         ]
         for path, handler, methods, desc in apis:
             self.context.register_web_api(
@@ -578,6 +591,103 @@ class TiancaiPlugin(Star):
             logger.exception("手动同步公共源失败")
             return error_response(str(exc), status_code=500)
         return json_response(result)
+
+    async def api_admin_status(self):
+        unlocked = self._is_admin_unlocked()
+        token_ok = bool(str(self.config.get("github_token") or "").strip())
+        phrase_ok = bool(str(self.config.get("admin_passphrase") or "").strip())
+        return json_response(
+            {
+                "unlocked": unlocked,
+                "token_configured": token_ok,
+                "passphrase_configured": phrase_ok,
+                "can_publish": unlocked and token_ok and phrase_ok,
+                "repo": str(self.config.get("github_repo") or ""),
+                "branch": str(self.config.get("github_branch") or "main"),
+                "index_path": str(
+                    self.config.get("github_index_path") or "public/public_index.json"
+                ),
+                "release_tag": str(
+                    self.config.get("github_release_tag") or "tiancai-videos"
+                ),
+                "proxy": self._github_proxy_prefix(),
+                "max_upload_mb": int(self.config.get("max_public_upload_mb", 95) or 95),
+                "unlock_remain_sec": self._admin_unlock_remain(),
+            }
+        )
+
+    async def api_admin_unlock(self):
+        payload = await request.json(default={})
+        phrase = str(payload.get("passphrase") or "")
+        expected = str(self.config.get("admin_passphrase") or "")
+        if not expected:
+            return error_response(
+                "未配置 admin_passphrase。请在插件配置中设置管理口令（仅保存在你的服务器）。",
+                status_code=400,
+            )
+        if not hmac.compare_digest(phrase, expected):
+            self._audit("admin_unlock_fail", detail=f"user={request.username}")
+            return error_response("口令错误", status_code=403)
+        key = self._admin_session_key()
+        self._admin_unlock_until[key] = time.time() + ADMIN_UNLOCK_SECONDS
+        self._audit("admin_unlock_ok", detail=f"user={request.username}")
+        return json_response(
+            {
+                "unlocked": True,
+                "expire_in": ADMIN_UNLOCK_SECONDS,
+                "can_publish": bool(str(self.config.get("github_token") or "").strip()),
+            }
+        )
+
+    async def api_admin_lock(self):
+        key = self._admin_session_key()
+        self._admin_unlock_until.pop(key, None)
+        return json_response({"unlocked": False})
+
+    async def api_public_publish(self):
+        if not self._is_admin_unlocked():
+            return error_response("维护面板未解锁", status_code=403)
+        token = str(self.config.get("github_token") or "").strip()
+        if not token:
+            return error_response("未配置 github_token", status_code=400)
+
+        payload = await request.json(default={})
+        ids = self._normalize_ids(payload.get("ids"))
+        if not ids:
+            return error_response("ids required", status_code=400)
+
+        async with self._publish_lock:
+            try:
+                result = await asyncio.to_thread(
+                    self._publish_local_ids_to_github, ids, token
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("发布公共库失败")
+                return error_response(str(exc), status_code=500)
+        self._audit(
+            "public_publish",
+            detail=(
+                f"user={request.username};ok={result.get('published')};"
+                f"fail={result.get('failed')}"
+            ),
+        )
+        return json_response(result)
+
+    def _admin_session_key(self) -> str:
+        user = str(request.username or "dashboard")
+        host = str(getattr(request, "client_host", None) or "")
+        return f"{user}|{host}"
+
+    def _is_admin_unlocked(self) -> bool:
+        key = self._admin_session_key()
+        until = self._admin_unlock_until.get(key) or 0
+        return time.time() < until
+
+    def _admin_unlock_remain(self) -> int:
+        key = self._admin_session_key()
+        until = self._admin_unlock_until.get(key) or 0
+        remain = int(until - time.time())
+        return max(remain, 0)
 
     def _normalize_ids(self, raw: Any) -> set[str]:
         """支持完整 uuid，或顺序编号（会解析成对应 uuid）。"""
@@ -1086,6 +1196,8 @@ class TiancaiPlugin(Star):
             "last_sync_at_human": self._fmt_time(meta.get("last_sync_at")) or "",
             "last_error": meta.get("last_error") or "",
             "name": meta.get("name") or "",
+            "proxy": self._github_proxy_prefix(),
+            "repo": str(self.config.get("github_repo") or ""),
         }
 
     def _load_public_meta(self) -> dict[str, Any]:
@@ -1164,8 +1276,9 @@ class TiancaiPlugin(Star):
                 }
 
             url = str(self.config.get("public_index_url") or "").strip()
+            fetch_url = self._with_github_proxy(url)
             try:
-                text = await asyncio.to_thread(self._http_get_text, url)
+                text = await asyncio.to_thread(self._http_get_text, fetch_url)
                 data = json.loads(text)
                 if not isinstance(data, dict) or not isinstance(
                     data.get("videos"), list
@@ -1182,6 +1295,7 @@ class TiancaiPlugin(Star):
                         "last_error": "",
                         "name": str(data.get("name") or ""),
                         "source_url": url,
+                        "fetch_url": fetch_url,
                         "count": count,
                     }
                 )
@@ -1199,22 +1313,51 @@ class TiancaiPlugin(Star):
                 self._save_public_meta(meta)
                 raise
 
-    @staticmethod
-    def _http_get_text(url: str, timeout: int = 30) -> str:
-        req = Request(
-            url,
-            headers={"User-Agent": "astrbot_plugin_tiancai/1.4"},
-            method="GET",
-        )
+    def _github_proxy_prefix(self) -> str:
+        raw = str(self.config.get("github_proxy") or "").strip()
+        if not raw:
+            raw = DEFAULT_GITHUB_PROXY
+        if not raw.endswith("/"):
+            raw += "/"
+        return raw
+
+    def _with_github_proxy(self, url: str) -> str:
+        """对 github / gh 资源拼代理；已是代理地址则原样返回。"""
+        u = (url or "").strip()
+        if not u.startswith(("http://", "https://")):
+            return u
+        proxy = self._github_proxy_prefix()
+        if u.startswith(proxy):
+            return u
+        host = (urlparse(u).hostname or "").lower()
+        github_hosts = {
+            "github.com",
+            "raw.githubusercontent.com",
+            "objects.githubusercontent.com",
+            "codeload.github.com",
+            "release-assets.githubusercontent.com",
+        }
+        if host not in github_hosts and not host.endswith(".githubusercontent.com"):
+            return u
+        # gh-proxy 常见用法：https://gh-proxy.com/https://raw.githubusercontent.com/...
+        return proxy + u
+
+    def _http_get_text(self, url: str, timeout: int = 30, token: str = "") -> str:
+        headers = {"User-Agent": "astrbot_plugin_tiancai/1.5"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+            headers["Accept"] = "application/vnd.github+json"
+            headers["X-GitHub-Api-Version"] = "2022-11-28"
+        req = Request(url, headers=headers, method="GET")
         with urlopen(req, timeout=timeout) as resp:  # noqa: S310
             charset = resp.headers.get_content_charset() or "utf-8"
             return resp.read().decode(charset, errors="replace")
 
-    @staticmethod
-    def _http_download(url: str, dest: Path, timeout: int = 120) -> None:
+    def _http_download(self, url: str, dest: Path, timeout: int = 120) -> None:
+        fetch_url = self._with_github_proxy(url)
         req = Request(
-            url,
-            headers={"User-Agent": "astrbot_plugin_tiancai/1.4"},
+            fetch_url,
+            headers={"User-Agent": "astrbot_plugin_tiancai/1.5"},
             method="GET",
         )
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1222,6 +1365,320 @@ class TiancaiPlugin(Star):
         with urlopen(req, timeout=timeout) as resp, tmp.open("wb") as fp:  # noqa: S310
             shutil.copyfileobj(resp, fp)
         tmp.replace(dest)
+
+    def _http_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        token: str,
+        data: bytes | None = None,
+        content_type: str = "application/json",
+        timeout: int = 60,
+        extra_headers: dict[str, str] | None = None,
+    ) -> Any:
+        headers = {
+            "User-Agent": "astrbot_plugin_tiancai/1.5",
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if data is not None:
+            headers["Content-Type"] = content_type
+        if extra_headers:
+            headers.update(extra_headers)
+        req = Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlopen(req, timeout=timeout) as resp:  # noqa: S310
+                raw = resp.read()
+                if not raw:
+                    return {}
+                return json.loads(raw.decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"GitHub API {method} {url} -> {exc.code}: {body}") from exc
+
+    def _publish_local_ids_to_github(
+        self, ids: set[str], token: str
+    ) -> dict[str, Any]:
+        repo = str(self.config.get("github_repo") or "").strip()
+        branch = str(self.config.get("github_branch") or "main").strip() or "main"
+        index_path = (
+            str(self.config.get("github_index_path") or "public/public_index.json").strip()
+            or "public/public_index.json"
+        )
+        release_tag = (
+            str(self.config.get("github_release_tag") or "tiancai-videos").strip()
+            or "tiancai-videos"
+        )
+        max_mb = int(self.config.get("max_public_upload_mb", 95) or 95)
+        max_bytes = max(1, max_mb) * 1024 * 1024
+
+        if not re.match(r"^[^/\s]+/[^/\s]+$", repo):
+            raise ValueError("github_repo 格式应为 owner/repo")
+
+        index = self._load_index()
+        locals_map = {
+            str(v.get("id")): v
+            for v in index.get("videos", [])
+            if isinstance(v, dict) and v.get("deleted_at") is None
+        }
+
+        # 读取/创建远程菜单
+        remote_index = self._github_get_index_file(repo, branch, index_path, token)
+        videos = remote_index.setdefault("videos", [])
+        if not isinstance(videos, list):
+            videos = []
+            remote_index["videos"] = videos
+        existing_ids = {
+            str(v.get("id"))
+            for v in videos
+            if isinstance(v, dict) and v.get("id")
+        }
+        next_seq = 1
+        for v in videos:
+            if isinstance(v, dict):
+                try:
+                    next_seq = max(next_seq, int(v.get("seq") or 0) + 1)
+                except (TypeError, ValueError):
+                    pass
+
+        release = self._github_ensure_release(repo, release_tag, token)
+        upload_url_template = str(release.get("upload_url") or "")
+        if not upload_url_template:
+            raise RuntimeError("无法获取 Release upload_url")
+        upload_base = upload_url_template.split("{", 1)[0]
+
+        published: list[dict[str, Any]] = []
+        failed: list[dict[str, str]] = []
+        skipped: list[dict[str, str]] = []
+
+        for vid in sorted(ids):
+            item = locals_map.get(vid)
+            if not item:
+                failed.append({"id": vid, "error": "本地不存在或已在回收站"})
+                continue
+            pub_id = f"local_{vid}"
+            if pub_id in existing_ids or vid in existing_ids:
+                skipped.append({"id": vid, "error": "公共库已存在同来源条目"})
+                continue
+            path = self.videos_dir / str(item.get("filename") or "")
+            if not path.is_file():
+                failed.append({"id": vid, "error": "本地文件缺失"})
+                continue
+            size = path.stat().st_size
+            if size > max_bytes:
+                failed.append(
+                    {
+                        "id": vid,
+                        "error": f"文件过大 {self._fmt_size(size)} > {max_mb}MB",
+                    }
+                )
+                continue
+
+            suffix = path.suffix.lower() or ".mp4"
+            asset_name = f"{pub_id}{suffix}"
+            try:
+                asset = self._github_upload_release_asset(
+                    upload_base, asset_name, path, token
+                )
+                browser_url = str(
+                    asset.get("browser_download_url") or asset.get("url") or ""
+                )
+                if not browser_url:
+                    raise RuntimeError("上传成功但未返回下载地址")
+                entry = {
+                    "id": pub_id,
+                    "seq": next_seq,
+                    "title": item.get("note") or f"天菜#{item.get('seq') or ''}",
+                    "tags": item.get("tags") or list(DEFAULT_TAGS),
+                    "url": browser_url,
+                    "size": size,
+                    "sha256": self._sha256_file(path),
+                    "created_at": _now(),
+                    "source_local_id": vid,
+                    "source_local_seq": item.get("seq"),
+                }
+                videos.append(entry)
+                existing_ids.add(pub_id)
+                next_seq += 1
+                published.append(
+                    {
+                        "id": vid,
+                        "public_id": pub_id,
+                        "seq": entry["seq"],
+                        "url": browser_url,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed.append({"id": vid, "error": str(exc)})
+
+        remote_index["version"] = int(remote_index.get("version") or 1)
+        remote_index["updated_at"] = _now()
+        remote_index.setdefault("name", "天菜公共库")
+        remote_index.setdefault(
+            "license_note",
+            "仅放维护者有权公开分发的内容。用户插件只读同步，不能上传。",
+        )
+        remote_index["maintainer"] = "sxd55"
+        remote_index["videos"] = videos
+
+        if published:
+            self._github_put_index_file(
+                repo, branch, index_path, remote_index, token
+            )
+            # 刷新本地公共缓存
+            self.public_index_path.write_text(
+                json.dumps(remote_index, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+        return {
+            "published": len(published),
+            "failed": len(failed),
+            "skipped": len(skipped),
+            "items": published,
+            "errors": failed,
+            "skipped_items": skipped,
+            "repo": repo,
+            "index_path": index_path,
+            "release_tag": release_tag,
+        }
+
+    def _github_get_index_file(
+        self, repo: str, branch: str, path: str, token: str
+    ) -> dict[str, Any]:
+        api = f"{GITHUB_API}/repos/{repo}/contents/{quote(path)}?ref={quote(branch)}"
+        try:
+            data = self._http_json("GET", api, token=token)
+            content = base64.b64decode(data.get("content") or "").decode("utf-8")
+            parsed = json.loads(content)
+            if not isinstance(parsed, dict):
+                raise ValueError("remote index is not object")
+            parsed["_sha"] = data.get("sha")
+            return parsed
+        except RuntimeError as exc:
+            if "404" in str(exc):
+                return {
+                    "version": 1,
+                    "updated_at": _now(),
+                    "name": "天菜公共库",
+                    "videos": [],
+                    "_sha": None,
+                }
+            raise
+
+    def _github_put_index_file(
+        self,
+        repo: str,
+        branch: str,
+        path: str,
+        index_data: dict[str, Any],
+        token: str,
+    ) -> None:
+        payload_data = {k: v for k, v in index_data.items() if not str(k).startswith("_")}
+        body = json.dumps(payload_data, ensure_ascii=False, indent=2).encode("utf-8")
+        sha = index_data.get("_sha")
+        api = f"{GITHUB_API}/repos/{repo}/contents/{quote(path)}"
+        payload = {
+            "message": f"chore(tiancai): update public index ({_now()})",
+            "content": base64.b64encode(body).decode("ascii"),
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+        self._http_json(
+            "PUT",
+            api,
+            token=token,
+            data=json.dumps(payload).encode("utf-8"),
+        )
+
+    def _github_ensure_release(
+        self, repo: str, tag: str, token: str
+    ) -> dict[str, Any]:
+        api_get = f"{GITHUB_API}/repos/{repo}/releases/tags/{quote(tag)}"
+        try:
+            return self._http_json("GET", api_get, token=token)
+        except RuntimeError as exc:
+            if "404" not in str(exc):
+                raise
+        api_create = f"{GITHUB_API}/repos/{repo}/releases"
+        payload = {
+            "tag_name": tag,
+            "name": "Tiancai Public Videos",
+            "body": "天菜公共库视频附件（由插件维护者发布，普通用户只读下载）",
+            "draft": False,
+            "prerelease": False,
+        }
+        return self._http_json(
+            "POST",
+            api_create,
+            token=token,
+            data=json.dumps(payload).encode("utf-8"),
+        )
+
+    def _github_upload_release_asset(
+        self, upload_base: str, asset_name: str, path: Path, token: str
+    ) -> dict[str, Any]:
+        # 若同名资产已存在，先删再传
+        # upload_base like https://uploads.github.com/repos/../releases/123/assets
+        url = f"{upload_base}?name={quote(asset_name)}"
+        data = path.read_bytes()
+        mime = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        headers = {
+            "User-Agent": "astrbot_plugin_tiancai/1.5",
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": mime,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Length": str(len(data)),
+        }
+        req = Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urlopen(req, timeout=300) as resp:  # noqa: S310
+                return json.loads(resp.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            # 已存在则尝试删除后重传
+            if exc.code in {422, 409} or "already_exists" in body:
+                self._github_delete_release_asset_by_name(
+                    upload_base, asset_name, token
+                )
+                req2 = Request(url, data=data, headers=headers, method="POST")
+                with urlopen(req2, timeout=300) as resp2:  # noqa: S310
+                    return json.loads(resp2.read().decode("utf-8"))
+            raise RuntimeError(f"上传资产失败 {exc.code}: {body}") from exc
+
+    def _github_delete_release_asset_by_name(
+        self, upload_base: str, asset_name: str, token: str
+    ) -> None:
+        # upload_base: https://uploads.github.com/repos/{owner}/{repo}/releases/{id}/assets
+        parts = urlparse(upload_base).path.strip("/").split("/")
+        # repos / owner / repo / releases / id / assets
+        if len(parts) < 6:
+            return
+        owner, repo, release_id = parts[1], parts[2], parts[4]
+        api = f"{GITHUB_API}/repos/{owner}/{repo}/releases/{release_id}/assets"
+        assets = self._http_json("GET", api, token=token)
+        if not isinstance(assets, list):
+            return
+        for asset in assets:
+            if str(asset.get("name")) == asset_name:
+                asset_id = asset.get("id")
+                if asset_id:
+                    del_api = (
+                        f"{GITHUB_API}/repos/{owner}/{repo}/releases/assets/{asset_id}"
+                    )
+                    self._http_json("DELETE", del_api, token=token)
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        h = hashlib.sha256()
+        with path.open("rb") as fp:
+            for chunk in iter(lambda: fp.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
     async def _resolve_public_video(self, item: dict[str, Any]) -> Video:
         url = str(item.get("url") or "").strip()
@@ -1238,13 +1695,13 @@ class TiancaiPlugin(Star):
         if cache_on and cache_path.is_file() and cache_path.stat().st_size > 0:
             return Video.fromFileSystem(path=str(cache_path))
 
+        fetch_url = self._with_github_proxy(url)
         if cache_on:
             await asyncio.to_thread(self._http_download, url, cache_path)
             if cache_path.is_file() and cache_path.stat().st_size > 0:
                 return Video.fromFileSystem(path=str(cache_path))
 
-        # 无缓存或下载失败时，尝试直接 URL 发送
-        return Video.fromURL(url=url)
+        return Video.fromURL(url=fetch_url)
 
     # ------------------------------------------------------------------
     # 视频提取

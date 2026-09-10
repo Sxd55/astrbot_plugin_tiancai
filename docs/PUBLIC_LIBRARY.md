@@ -1,143 +1,83 @@
 # 天菜公共库运营说明
 
-本文约定：**谁上传、谁审核、用户能不能传**。  
-推荐架构：**GitHub 公开菜单（index）+ Cloudflare R2 存视频**。
+推荐架构：**本仓库 `public/public_index.json` 做菜单 + GitHub Release 存视频**。  
+拉取时可走代理（默认 `https://gh-proxy.com/`）。
 
 ---
 
-## 1. 角色（必须分清）
+## 1. 角色
 
-| 角色 | 职责 | 有没有 R2 密钥 |
+| 角色 | 职责 | Token / 口令 |
 | --- | --- | --- |
-| 普通用户（装插件） | 同步菜单、「看看天菜」、本机「收进天菜」 | **没有** |
-| 投稿人 | 提交候选内容与说明 | **没有** |
-| 审核人 | 判断能否进公共库 | 通常没有 |
-| 上传维护者 | 审核通过后上传 R2、改 `public_index.json` | **有** |
-| 仓库管理员 | 合并/回滚菜单、下架 | 有 GitHub 权限 |
+| 普通用户 | 同步菜单、「看看天菜」、本机收藏 | 无 |
+| 维护者（你） | 审核内容；在 WebUI 解锁后批量发布 | `github_token` + `admin_passphrase` |
 
 **铁律：**
 
-- 云盘上传 ≠ 所有用插件的人  
-- 群里「收进天菜」≠ 自动进公共库  
-- R2 密钥只放在维护者本机/密钥管理里，禁止发到群聊  
-
-起步建议：**上传 + 审核都由你一个人做**；稳定后再加 1～2 个可信协作者。
+- 口令与 Token 只写在**你的服务器插件配置**里（secret），不要写进开源仓库
+- 群里「收进天菜」只进本地库，不会自动进公共库
+- 没有 Token 的人即使看到按钮，也无法发布
 
 ---
 
-## 2. 标准流程
+## 2. 维护者配置（你的 AstrBot）
 
-### 2.1 维护者自己上架（最简）
+| 配置 | 示例 | 说明 |
+| --- | --- | --- |
+| `github_token` | `ghp_xxx` | 有 `repo` 权限的 PAT |
+| `admin_passphrase` | 你自己设的口令 | 解锁 WebUI「发布到公共库」 |
+| `github_repo` | `sxd55/astrbot_plugin_tiancai` | 公共库所在仓库 |
+| `github_branch` | `main` | 菜单分支 |
+| `github_index_path` | `public/public_index.json` | 菜单路径 |
+| `github_release_tag` | `tiancai-videos` | 视频 Release 标签 |
+| `github_proxy` | 留空 | 默认 `https://gh-proxy.com/` |
+| `public_enabled` | `true` | 启用公共源读取 |
+| `public_index_url` | raw 地址 | 见下 |
+| `library_mode` | `mixed` | 本地+公共混合抽 |
 
-1. 确认内容你有权公开分发  
-2. 压缩到合适大小（建议单条数 MB～十几 MB）  
-3. 上传到 R2，得到可匿名访问的 `https://...mp4`  
-4. 浏览器无登录能打开/下载该链接  
-5. 编辑 GitHub 仓库里的 `public_index.json` 增加条目  
-6. `git push`  
-7. 用户插件下次同步后即可抽到  
-
-### 2.2 社区投稿（推荐长期）
+`public_index_url` 示例：
 
 ```text
-投稿人提交（Issue / 群内登记 / 表单）
-        ↓
-审核人按清单审核
-        ↓ 通过
-维护者上传 R2 + 更新 public_index.json + push
-        ↓
-全体用户只读同步
+https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/main/public/public_index.json
 ```
 
-投稿人**永不**获得上传密钥。
-
-### 2.3 下架
-
-1. 从 `public_index.json` 删除对应条目并 push  
-2. 删除 R2 上的对象（可选但建议）  
-3. 用户端下次同步后不再抽到；本地缓存可保留直到用户清理  
+插件拉取时会自动加代理前缀（可用 `github_proxy` 覆盖默认）。
 
 ---
 
-## 3. 审核清单（过不了就不上架）
+## 3. 发布流程（只有你能做）
 
-1. **版权**：自制 / 已授权 / 明确可再分发  
-2. **合规**：无违法违规、严重引战、露骨擦边等你不想公开承担的内容  
-3. **体积**：过大浪费免费额度  
-4. **重复**：同一段不要反复占空间  
-5. **直链**：必须 HTTPS，且匿名可 GET  
+1. 本地「收进天菜」或管理台上传到**本地库**
+2. 天菜管理台 → 右上角 **维护** → 输入 `admin_passphrase`
+3. 在「视频库」勾选 → **发布到公共库**
+4. 插件会：上传 mp4 到 Release `tiancai-videos`，并更新 `public/public_index.json`
+5. 其他用户同步菜单后即可抽到
 
----
-
-## 4. 仓库与文件约定
-
-建议单独建公开仓库（不要和插件源码搅在一起），例如：
-
-```text
-tiancai-public/
-├── README.md
-├── public_index.json      # 插件拉取的菜单
-└── CONTRIBUTING.md        # 可选：投稿格式
-```
-
-插件配置：
-
-```text
-public_enabled = true
-public_index_url = https://raw.githubusercontent.com/<你>/tiancai-public/main/public_index.json
-library_mode = mixed
-public_cache_enabled = true
-```
-
-也可使用 jsDelivr：
-
-```text
-https://cdn.jsdelivr.net/gh/<你>/tiancai-public@main/public_index.json
-```
-
-菜单字段见仓库内 `public_index.json` 示例。
+单文件默认上限 **95MB**（GitHub 硬顶 100MB）。
 
 ---
 
-## 5. R2 侧注意点
+## 4. 普通用户
 
-- 桶策略：公共**读**、禁止匿名**写**  
-- 仅维护者 Access Key 可上传  
-- 对象键建议：`videos/0001.mp4`、`videos/0002.mp4`  
-- 绑定自定义域名更稳（可选）  
-- 免费额度有限：靠精选内容 + 用户端缓存  
+1. `public_enabled = true`
+2. 填写同一 `public_index_url`
+3. `library_mode = public` 或 `mixed`
+4. 建议开启 `public_cache_enabled`
+5. 「看看天菜」/「同步天菜源」
 
-额度会变，以 [Cloudflare R2 Pricing](https://developers.cloudflare.com/r2/pricing/) 为准。
-
----
-
-## 6. 和插件行为的关系
-
-| 动作 | 结果 |
-| --- | --- |
-| 收进天菜 | 只进**本机私有库** |
-| 看看天菜（local） | 只抽本地 |
-| 看看天菜（public） | 只抽公共菜单 |
-| 看看天菜（mixed） | 本地 + 公共混合抽 |
-| 同步公共源 | 只下载菜单（及抽中时的视频），不上传 |
+他们没有你的口令与 Token，不能往公共库上传。
 
 ---
 
-## 7. 责任说明（白话）
+## 5. 审核与下架
 
-- 谁拥有 R2 桶，谁承担账单与密钥安全  
-- 谁点头上架，谁对那条内容负责  
-- 开源插件若内置官方源，等于你在运营小型公共内容源：建议默认关闭，并写清投诉/下架方式  
+审核：版权、合规、体积、去重。  
+下架：从 `public_index.json` 删除条目并 push；可选删除 Release 资产。
 
 ---
 
-## 8. 最小起步清单
+## 6. 安全
 
-- [ ] 创建公开仓库 `tiancai-public`  
-- [ ] 放入空的或示例 `public_index.json`  
-- [ ] 开通 R2，上传 1 条测试 mp4，确认匿名可下  
-- [ ] 把 URL 写入 JSON 并 push  
-- [ ] 插件填写 `public_index_url`，模式选 `mixed`，开启缓存  
-- [ ] 群里试「看看天菜」  
-
-完成后，所有按同一 URL 配置的用户，就会从**同一份公共菜单**取天菜。
+- 不要把口令硬编码进开源代码；放到配置即可
+- Token 泄露请立刻作废重建
+- 公共 URL 人人可下，只放你愿意公开的内容

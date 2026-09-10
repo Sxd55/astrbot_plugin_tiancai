@@ -306,10 +306,18 @@ button.danger {
   flex: 1;
 }
 
-.hint {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.88rem;
+.admin-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -4px 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, var(--bg-elev));
+  color: var(--ink);
+  font-size: 0.86rem;
 }
 
 .video-grid {

@@ -3,7 +3,7 @@ Set-Location -LiteralPath $PSScriptRoot
 
 $RemoteUrl = "https://github.com/sxd55/astrbot_plugin_tiancai.git"
 $LogFile = Join-Path $PSScriptRoot "push_log.txt"
-$CommitMsg = "feat(v1.4.0): public tiancai source sync, cache, mixed mode, ops docs"
+$CommitMsg = "feat(v1.5.0): admin publish to GitHub public library with proxy"
 
 function Write-Log([string]$Message) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
@@ -19,7 +19,7 @@ function Fail([string]$Message) {
 }
 
 Add-Content -LiteralPath $LogFile -Value "" -Encoding UTF8
-Write-Log "Push Batch4 start"
+Write-Log "Push Batch5 start"
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "git not found" }
 if (-not (Test-Path ".git")) { Fail ".git missing" }
@@ -72,6 +72,6 @@ if (-not $ok) { Fail "git push failed after 3 tries" }
 
 Write-Log "SUCCESS"
 Write-Host "Done: $RemoteUrl"
-Write-Host "Version: v1.4.0 Batch4 public source"
+Write-Host "Version: v1.5.0 Batch5"
 Read-Host "Press Enter to exit"
 exit 0

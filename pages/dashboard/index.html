@@ -19,9 +19,10 @@
         <div class="top-actions">
           <label class="upload-btn">
             <input id="fileInput" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.flv" hidden />
-            上传视频
+            上传到本地
           </label>
           <button type="button" class="ghost" id="btnRefresh">刷新</button>
+          <button type="button" class="ghost" id="btnAdminEntry">维护</button>
         </div>
       </header>
 
@@ -63,7 +64,12 @@
             </select>
             <button type="button" class="ghost" id="btnSearch">筛选</button>
             <div class="spacer"></div>
+            <button type="button" class="primary" id="btnPublishGithub" hidden disabled>发布到公共库</button>
             <button type="button" class="danger" id="btnBatchDelete" disabled>移入回收站</button>
+          </div>
+          <div id="adminBar" class="admin-bar" hidden>
+            <span id="adminBarText">维护面板未解锁</span>
+            <button type="button" class="ghost" id="btnAdminLock" hidden>锁定</button>
           </div>
           <div id="libraryList" class="video-grid"></div>
           <div class="pager">
@@ -112,6 +118,21 @@
           <div class="dialog-actions">
             <button type="button" class="ghost" id="editCancel">取消</button>
             <button type="submit" class="primary">保存</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="adminDialog">
+        <form method="dialog" id="adminForm" class="edit-form">
+          <h3>解锁维护面板</h3>
+          <p class="hint">口令仅保存在你的服务器插件配置中，不会写进开源代码。</p>
+          <label>
+            管理口令
+            <input id="adminPass" type="password" autocomplete="current-password" placeholder="admin_passphrase" />
+          </label>
+          <div class="dialog-actions">
+            <button type="button" class="ghost" id="adminCancel">取消</button>
+            <button type="submit" class="primary">解锁</button>
           </div>
         </form>
       </dialog>

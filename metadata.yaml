@@ -2,11 +2,11 @@ name: astrbot_plugin_tiancai
 display_name: 天菜视频库
 short_desc: 收藏群视频，随机「看看天菜」
 desc: |
-  回复 QQ 群视频消息并发送「收进天菜」即可下载保存到本地全局视频库；
-  发送「看看天菜」可从本地库和/或公共天菜源抽取。
-  支持白名单入库、冷却、软删除、顺序编号、默认标签「天菜」、
-  WebUI 管理台，以及 GitHub 菜单 + 对象存储直链的只读公共源。
-version: v1.4.0
+  本地天菜库 + 可选公共天菜源。
+  支持收进/随机/软删除/顺序编号/WebUI 管理台预览。
+  公共源：GitHub 菜单 + Release 视频；默认经 gh-proxy 拉取。
+  维护者可用配置中的 Token + 口令，在 WebUI 解锁后批量发布到公共库。
+version: v1.5.0
 author: sxd55
 repo: https://github.com/sxd55/astrbot_plugin_tiancai
 astrbot_version: ">=4.9.2"
