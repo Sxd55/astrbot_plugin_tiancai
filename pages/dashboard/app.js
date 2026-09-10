@@ -13,31 +13,239 @@ const state = {
   config: null,
 };
 
-const SETTINGS_FIELDS = [
-  ["public_enabled", "启用公共源", "bool"],
-  ["public_index_url", "公共菜单 URL", "text"],
-  ["library_mode", "抽取模式 (local/public/mixed)", "text"],
-  ["public_sync_hours", "同步间隔小时", "number"],
-  ["public_auto_import", "公共视频自动导入本地库", "bool"],
-  ["public_weight", "mixed 公共权重", "number"],
-  ["github_proxy", "GitHub 代理（留空=gh-proxy.com）", "text"],
-  ["github_token", "GitHub Token（发布用，不回显）", "password"],
-  ["github_repo", "你的仓库 owner/repo", "text"],
-  ["github_branch", "分支", "text"],
-  ["github_index_path", "菜单路径", "text"],
-  ["github_release_tag", "Release 标签", "text"],
-  ["max_public_upload_mb", "上传大小上限 MB", "number"],
-  ["cooldown_seconds", "抽取冷却秒数", "number"],
-  ["max_videos", "本地库上限（0不限）", "number"],
-  ["collect_whitelist", "入库白名单（逗号分隔）", "text"],
-  ["cmd_collect", "入库指令", "text"],
-  ["cmd_show", "随机发送指令", "text"],
-  ["cmd_sync", "同步指令", "text"],
-  ["cmd_count", "数量指令", "text"],
-  ["cmd_delete", "删除指令", "text"],
-  ["cmd_detail", "详情指令", "text"],
-  ["cmd_help", "帮助指令", "text"],
-  ["cmd_clear", "清空指令", "text"],
+const DEFAULT_PUBLIC_INDEX_URL =
+  "https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/main/public/public_index.json";
+
+/** 分组设置：title / desc / fields[{key,label,type,desc,placeholder,options}] */
+const SETTINGS_GROUPS = [
+  {
+    title: "公共源（读取）",
+    desc: "控制插件如何同步并抽取公共菜单。留空的菜单 URL 会使用官方默认地址。",
+    fields: [
+      {
+        key: "public_enabled",
+        label: "启用公共源",
+        type: "bool",
+        desc: "开启后会按间隔同步公共菜单，并可在抽取时使用公共视频。关闭则只使用本地库。",
+      },
+      {
+        key: "public_index_url",
+        label: "公共菜单 URL",
+        type: "text",
+        desc: "公共库菜单 JSON 的 HTTPS 地址（通常是 GitHub raw）。留空则使用官方默认菜单。",
+        placeholder: DEFAULT_PUBLIC_INDEX_URL,
+      },
+      {
+        key: "library_mode",
+        label: "抽取模式",
+        type: "select",
+        desc: "决定「随机发送」从哪里抽：仅本地 / 仅公共 / 本地与公共混合。",
+        options: [
+          { value: "local", label: "仅本地库" },
+          { value: "public", label: "仅公共源" },
+          { value: "mixed", label: "本地 + 公共混合（推荐）" },
+        ],
+      },
+      {
+        key: "public_sync_hours",
+        label: "同步间隔（小时）",
+        type: "number",
+        desc: "多久重新拉取一次公共菜单。填 0 表示每次抽取前都尝试同步（更及时，也更费网络）。",
+        placeholder: "12",
+      },
+      {
+        key: "public_auto_import",
+        label: "公共视频自动导入本地库",
+        type: "bool",
+        desc: "抽中公共视频并下载后，自动写入本地视频库，之后可预览、编辑、再发布。建议开启。",
+      },
+      {
+        key: "public_weight",
+        label: "混合模式下公共权重",
+        type: "number",
+        desc: "仅 library_mode=mixed 时生效。1=与本地同等；小于 1 更常抽本地；大于 1 更常抽公共。",
+        placeholder: "1.0",
+      },
+      {
+        key: "github_proxy",
+        label: "GitHub 代理前缀",
+        type: "text",
+        desc: "拉取 GitHub raw/Release 时加在原 URL 前面。留空默认 https://gh-proxy.com/ 。若直连可用可填直连代理或保持默认。",
+        placeholder: "https://gh-proxy.com/",
+      },
+    ],
+  },
+  {
+    title: "发布到 GitHub（写入你自己的仓库）",
+    desc: "只有填写了 Token 和你自己的仓库后，才能在视频库把本地条目发布到公共库。不会默认写进别人的仓库。",
+    fields: [
+      {
+        key: "github_token",
+        label: "GitHub Token",
+        type: "password",
+        desc: "用于创建/更新 Release 与 public_index.json。需要对该仓库有写入权限的 PAT。留空表示不修改已保存的 Token。",
+        placeholder: "已配置则留空不改；未配置请粘贴 ghp_... / github_pat_...",
+      },
+      {
+        key: "github_repo",
+        label: "你的仓库 owner/repo",
+        type: "text",
+        desc: "发布目标仓库，格式：用户名/仓库名。必须手填你自己的仓库，例如 yourname/tiancai-public。读取官方菜单不依赖此项。",
+        placeholder: "yourname/tiancai-public",
+      },
+      {
+        key: "github_branch",
+        label: "菜单所在分支",
+        type: "text",
+        desc: "更新 public_index.json 时提交到的分支，一般是 main。",
+        placeholder: "main",
+      },
+      {
+        key: "github_index_path",
+        label: "仓库内菜单路径",
+        type: "text",
+        desc: "菜单文件在仓库中的路径。默认 public/public_index.json。",
+        placeholder: "public/public_index.json",
+      },
+      {
+        key: "github_release_tag",
+        label: "视频 Release 标签",
+        type: "text",
+        desc: "视频作为 GitHub Release 附件上传时使用的标签名。同仓库内建议固定一个标签持续追加。",
+        placeholder: "tiancai-videos",
+      },
+      {
+        key: "max_public_upload_mb",
+        label: "单条上传大小上限（MB）",
+        type: "number",
+        desc: "超过此大小的本地视频不允许发布。GitHub 单文件硬顶约 100MB，建议不超过 95。",
+        placeholder: "95",
+      },
+    ],
+  },
+  {
+    title: "本地库与抽取",
+    desc: "控制本机收藏容量、冷却和入库权限。",
+    fields: [
+      {
+        key: "cooldown_seconds",
+        label: "抽取冷却（秒）",
+        type: "number",
+        desc: "同一用户两次「随机发送」的最短间隔。管理员不受冷却限制。0 表示不限制。",
+        placeholder: "15",
+      },
+      {
+        key: "max_videos",
+        label: "本地库上限",
+        type: "number",
+        desc: "本地在库视频最大数量（不含回收站）。0 表示不限制。",
+        placeholder: "0",
+      },
+      {
+        key: "allow_duplicate",
+        label: "允许重复入库同一条消息",
+        type: "bool",
+        desc: "关闭后，同一条原群消息只能入库一次（按消息 ID 去重）。",
+      },
+      {
+        key: "collect_whitelist",
+        label: "入库白名单 QQ",
+        type: "text",
+        desc: "除 AstrBot 管理员外，允许使用入库指令的 QQ 号。多个用逗号分隔。",
+        placeholder: "123456,234567",
+      },
+      {
+        key: "recent_penalty_count",
+        label: "少重复：近期条数",
+        type: "number",
+        desc: "最近发出的 N 条会降低再次被抽中的权重，减少连着抽到同一条。",
+        placeholder: "8",
+      },
+      {
+        key: "recent_penalty_weight",
+        label: "少重复：近期权重",
+        type: "number",
+        desc: "近期已发视频的权重倍率。普通为 1.0；越小越不容易马上再抽到。",
+        placeholder: "0.15",
+      },
+      {
+        key: "pinned_weight",
+        label: "置顶权重",
+        type: "number",
+        desc: "标记为置顶的视频基础权重，越大越容易被抽到。",
+        placeholder: "3.0",
+      },
+      {
+        key: "storage_subdir",
+        label: "本地存储子目录名",
+        type: "text",
+        desc: "视频文件保存在 data/plugin_data/astrbot_plugin_tiancai/<该目录>/ 下。一般无需修改。",
+        placeholder: "videos",
+      },
+    ],
+  },
+  {
+    title: "指令别名",
+    desc: "可自定义触发词。多个别名用英文/中文逗号分隔。修改后立即按新文案匹配（无需改代码）。",
+    fields: [
+      {
+        key: "cmd_collect",
+        label: "入库指令",
+        type: "text",
+        desc: "回复视频后发送这些词可入库。",
+        placeholder: "收进天菜,加入天菜,天菜入库",
+      },
+      {
+        key: "cmd_show",
+        label: "随机发送指令",
+        type: "text",
+        desc: "发送这些词会随机发一条视频。",
+        placeholder: "看看天菜,来点天菜,天菜",
+      },
+      {
+        key: "cmd_sync",
+        label: "同步公共源指令",
+        type: "text",
+        desc: "手动拉取公共菜单。",
+        placeholder: "同步天菜源,天菜同步,同步公共天菜",
+      },
+      {
+        key: "cmd_count",
+        label: "数量查询指令",
+        type: "text",
+        desc: "查看本地/公共数量。",
+        placeholder: "天菜数量,天菜库,天菜列表",
+      },
+      {
+        key: "cmd_delete",
+        label: "删除指令",
+        type: "text",
+        desc: "用法：指令 + 编号，例如：删除天菜 3",
+        placeholder: "删除天菜,天菜删除",
+      },
+      {
+        key: "cmd_detail",
+        label: "详情指令",
+        type: "text",
+        desc: "用法：指令 + 编号，例如：天菜详情 3",
+        placeholder: "天菜详情,天菜信息",
+      },
+      {
+        key: "cmd_help",
+        label: "帮助指令",
+        type: "text",
+        desc: "查看当前生效的指令说明。",
+        placeholder: "天菜帮助,天菜说明,天菜指令",
+      },
+      {
+        key: "cmd_clear",
+        label: "清空指令（仅管理员）",
+        type: "text",
+        desc: "将全部在库视频移入回收站。",
+        placeholder: "清空天菜",
+      },
+    ],
+  },
 ];
 
 const $ = (sel) => document.querySelector(sel);
@@ -371,8 +579,8 @@ function updateBatchButtons() {
   const hint = $("#publishHint");
   if (hint) {
     hint.textContent = state.canPublish
-      ? "已配置 Token 与仓库：勾选本地视频后可发布到你自己的 GitHub 公共库。"
-      : "请先在「设置」填写 github_token 与 github_repo（你自己的仓库），才能发布。";
+      ? "已配置 Token 与你的仓库：勾选本地视频后可发布到该仓库。"
+      : "发布前请在「设置」填写 github_token，并手填你自己的 github_repo（owner/repo）。公共菜单可留空使用官方默认。";
   }
 }
 
@@ -494,20 +702,67 @@ async function loadSettings() {
     const data = await bridge.apiGet("config/get");
     state.config = data.config || {};
     const cfg = state.config;
-    form.innerHTML = SETTINGS_FIELDS.map(([key, label, type]) => {
-      let value = cfg[key];
-      if (key === "collect_whitelist" && Array.isArray(value)) value = value.join(",");
-      if (key === "github_token") {
-        return `<label>${esc(label)}
-          <input name="${esc(key)}" type="password" placeholder="${cfg.github_token_configured ? "已配置（留空不修改）" : "粘贴你的 PAT"}" />
-        </label>`;
-      }
-      if (type === "bool") {
-        return `<label class="check"><input name="${esc(key)}" type="checkbox" ${value ? "checked" : ""}/> ${esc(label)}</label>`;
-      }
-      return `<label>${esc(label)}
-        <input name="${esc(key)}" type="${type === "number" ? "number" : "text"}" value="${esc(value ?? "")}" />
-      </label>`;
+    form.innerHTML = SETTINGS_GROUPS.map((group) => {
+      const fieldsHtml = group.fields
+        .map((field) => {
+          let value = cfg[field.key];
+          if (field.key === "collect_whitelist" && Array.isArray(value)) {
+            value = value.join(",");
+          }
+          if (field.key === "public_index_url" && !value) {
+            value = "";
+          }
+          if (field.key === "github_token") {
+            return `<div class="setting-item">
+              <div class="setting-label">${esc(field.label)}</div>
+              <div class="setting-desc">${esc(field.desc)}</div>
+              <input name="${esc(field.key)}" type="password" placeholder="${esc(
+                cfg.github_token_configured
+                  ? "已配置（留空不修改）"
+                  : field.placeholder || "粘贴你的 PAT",
+              )}" />
+            </div>`;
+          }
+          if (field.type === "bool") {
+            return `<div class="setting-item">
+              <label class="check">
+                <input name="${esc(field.key)}" type="checkbox" ${value ? "checked" : ""}/>
+                <span>${esc(field.label)}</span>
+              </label>
+              <div class="setting-desc">${esc(field.desc)}</div>
+            </div>`;
+          }
+          if (field.type === "select") {
+            const opts = (field.options || [])
+              .map((opt) => {
+                const selected = String(value || "mixed") === opt.value ? "selected" : "";
+                return `<option value="${esc(opt.value)}" ${selected}>${esc(opt.label)}</option>`;
+              })
+              .join("");
+            return `<div class="setting-item">
+              <div class="setting-label">${esc(field.label)}</div>
+              <div class="setting-desc">${esc(field.desc)}</div>
+              <select name="${esc(field.key)}">${opts}</select>
+            </div>`;
+          }
+          const shown =
+            value === undefined || value === null || value === ""
+              ? ""
+              : String(value);
+          return `<div class="setting-item">
+            <div class="setting-label">${esc(field.label)}</div>
+            <div class="setting-desc">${esc(field.desc)}</div>
+            <input name="${esc(field.key)}" type="${
+              field.type === "number" ? "number" : "text"
+            }" value="${esc(shown)}" placeholder="${esc(field.placeholder || "")}" />
+          </div>`;
+        })
+        .join("");
+      return `<section class="settings-group">
+        <h3>${esc(group.title)}</h3>
+        <p class="hint">${esc(group.desc)}</p>
+        ${fieldsHtml}
+      </section>`;
     }).join("");
   } catch (err) {
     form.innerHTML = `<div class="hint">加载失败：${esc(err.message || err)}</div>`;
@@ -518,14 +773,19 @@ async function saveSettings() {
   const form = $("#settingsForm");
   if (!form) return;
   const payload = {};
-  SETTINGS_FIELDS.forEach(([key, , type]) => {
-    const el = form.querySelector(`[name="${key}"]`);
-    if (!el) return;
-    if (type === "bool") payload[key] = !!el.checked;
-    else if (key === "github_token") {
-      if (el.value) payload[key] = el.value;
-    } else if (type === "number") payload[key] = el.value === "" ? 0 : Number(el.value);
-    else payload[key] = el.value;
+  SETTINGS_GROUPS.forEach((group) => {
+    group.fields.forEach((field) => {
+      const el = form.querySelector(`[name="${field.key}"]`);
+      if (!el) return;
+      if (field.type === "bool") payload[field.key] = !!el.checked;
+      else if (field.key === "github_token") {
+        if (el.value) payload[field.key] = el.value;
+      } else if (field.type === "number") {
+        payload[field.key] = el.value === "" ? 0 : Number(el.value);
+      } else {
+        payload[field.key] = el.value;
+      }
+    });
   });
   try {
     const result = await bridge.apiPost("config/save", payload);

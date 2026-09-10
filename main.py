@@ -118,7 +118,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.6.0",
+    "1.6.1",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -636,7 +636,8 @@ class TiancaiPlugin(Star):
             )
         if not repo:
             return error_response(
-                "未配置 github_repo。请填写你自己的仓库，例如 yourname/tiancai-public。",
+                "未配置 github_repo。发布必须填写你自己的仓库（owner/repo），"
+                "例如 yourname/tiancai-public。不会默认写到官方仓库。",
                 status_code=400,
             )
 

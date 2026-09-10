@@ -4,7 +4,8 @@ short_desc: 本地+公共天菜库，可自定义指令
 desc: |
   本地收藏与公共源混合抽取。默认启用公共菜单，支持代理拉取。
   公共视频可自动导入本地库。管理台可改配置/指令，并可发布到你自己的 GitHub 仓库。
-version: v1.6.0
+  设置项均有说明；抽取模式下拉选择；菜单 URL 留空用官方默认。
+version: v1.6.1
 author: sxd55
 repo: https://github.com/sxd55/astrbot_plugin_tiancai
 astrbot_version: ">=4.9.2"

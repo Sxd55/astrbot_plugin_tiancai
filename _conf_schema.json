@@ -56,11 +56,11 @@
   "public_index_url": {
     "description": "公共菜单 URL",
     "type": "string",
-    "hint": "GitHub raw 或你自己的 public_index.json 地址",
+    "hint": "公共库菜单 JSON 地址。留空则使用官方默认：https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/main/public/public_index.json",
     "default": "https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/main/public/public_index.json"
   },
   "library_mode": {
-    "description": "看看天菜抽取范围",
+    "description": "抽取模式",
     "type": "string",
     "hint": "local=仅本地；public=仅公共；mixed=本地+公共混合",
     "options": ["local", "public", "mixed"],
@@ -98,9 +98,9 @@
     "default": ""
   },
   "github_repo": {
-    "description": "你的公共库仓库 owner/repo",
+    "description": "你的仓库 owner/repo（发布必填）",
     "type": "string",
-    "hint": "例如 yourname/tiancai-public。发布会写到这个仓库",
+    "hint": "格式：用户名/仓库名。发布到公共库时必须填写你自己的仓库，例如 yourname/tiancai-public。读取官方默认菜单不依赖此项。",
     "default": ""
   },
   "github_branch": {

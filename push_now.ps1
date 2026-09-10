@@ -3,7 +3,7 @@ Set-Location -LiteralPath $PSScriptRoot
 
 $RemoteUrl = "https://github.com/sxd55/astrbot_plugin_tiancai.git"
 $LogFile = Join-Path $PSScriptRoot "push_log.txt"
-$CommitMsg = "feat(v1.6.0): default public source, UI settings, cmd aliases, auto-import, open publish"
+$CommitMsg = "feat(v1.6.1): settings UI with grouped descriptions, select mode, safer repo defaults"
 
 function Write-Log([string]$Message) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
