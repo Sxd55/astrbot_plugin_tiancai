@@ -1,0 +1,20 @@
+{
+  "storage_subdir": {
+    "description": "视频存储子目录名",
+    "type": "string",
+    "hint": "视频会保存在 data/plugin_data/astrbot_plugin_tiancai/<该目录>/ 下",
+    "default": "videos"
+  },
+  "max_videos": {
+    "description": "视频库最大数量",
+    "type": "int",
+    "hint": "超过上限时拒绝继续入库，设为 0 表示不限制",
+    "default": 0
+  },
+  "allow_duplicate": {
+    "description": "允许重复入库同一条消息",
+    "type": "bool",
+    "hint": "关闭后会根据原消息 ID 去重",
+    "default": false
+  }
+}

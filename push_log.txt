@@ -1,0 +1,6 @@
+﻿
+[2026-09-10 16:54:23] Start push for sxd55/astrbot_plugin_tiancai
+[2026-09-10 16:54:23] git: git version 2.50.1.windows.1
+[2026-09-10 16:54:23] gh not installed, will use pure git
+[2026-09-10 16:54:23] user.name=sxd55
+[2026-09-10 16:54:23] set local user.email=sxd55@users.noreply.github.com
