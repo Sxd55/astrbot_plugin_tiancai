@@ -26,7 +26,7 @@
   "cooldown_seconds": {
     "description": "看看天菜冷却秒数",
     "type": "int",
-    "hint": "同一用户两次「看看天菜」的最短间隔，0 表示不限制",
+    "hint": "同一用户两次抽取指令的最短间隔，0 表示不限制",
     "default": 15
   },
   "recent_penalty_count": {
@@ -50,32 +50,32 @@
   "public_enabled": {
     "description": "启用公共天菜源",
     "type": "bool",
-    "hint": "开启后会定期同步公开菜单；普通用户只能下载，不能上传",
-    "default": false
+    "hint": "开启后会定期同步公开菜单",
+    "default": true
   },
   "public_index_url": {
     "description": "公共菜单 URL",
     "type": "string",
-    "hint": "例如 https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/main/public/public_index.json",
-    "default": ""
+    "hint": "GitHub raw 或你自己的 public_index.json 地址",
+    "default": "https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/main/public/public_index.json"
   },
   "library_mode": {
     "description": "看看天菜抽取范围",
     "type": "string",
     "hint": "local=仅本地；public=仅公共；mixed=本地+公共混合",
     "options": ["local", "public", "mixed"],
-    "default": "local"
+    "default": "mixed"
   },
   "public_sync_hours": {
     "description": "公共菜单同步间隔（小时）",
     "type": "float",
-    "hint": "小于等于 0 表示每次看看天菜前都尝试同步",
+    "hint": "小于等于 0 表示每次抽取前都尝试同步",
     "default": 12
   },
-  "public_cache_enabled": {
-    "description": "缓存已下载的公共视频",
+  "public_auto_import": {
+    "description": "公共视频自动导入本地库",
     "type": "bool",
-    "hint": "开启后抽中公共视频会落到本地缓存，减少重复流量",
+    "hint": "下载公共视频后自动写入本地视频库（默认开启）",
     "default": true
   },
   "public_weight": {
@@ -91,41 +91,31 @@
     "default": ""
   },
   "github_token": {
-    "description": "GitHub Token（仅维护者）",
+    "description": "GitHub Token（发布公共库用）",
     "type": "string",
     "secret": true,
-    "hint": "用于发布公共库。需要 repo 权限的 PAT。不要提交到公开仓库。",
-    "default": ""
-  },
-  "admin_passphrase": {
-    "description": "管理口令（仅维护者）",
-    "type": "string",
-    "secret": true,
-    "hint": "WebUI 解锁「发布到公共库」按钮。只存在你的服务器配置中，不要写进开源代码。",
+    "hint": "发布到你自己的仓库时需要。PAT 需 repo 权限。不要提交到公开代码。",
     "default": ""
   },
   "github_repo": {
-    "description": "公共库仓库 owner/repo",
+    "description": "你的公共库仓库 owner/repo",
     "type": "string",
-    "hint": "例如 sxd55/astrbot_plugin_tiancai 或 sxd55/tiancai-public",
-    "default": "sxd55/astrbot_plugin_tiancai"
+    "hint": "例如 yourname/tiancai-public。发布会写到这个仓库",
+    "default": ""
   },
   "github_branch": {
     "description": "公共菜单所在分支",
     "type": "string",
-    "hint": "更新 public_index.json 时使用",
     "default": "main"
   },
   "github_index_path": {
     "description": "仓库内菜单路径",
     "type": "string",
-    "hint": "例如 public/public_index.json",
     "default": "public/public_index.json"
   },
   "github_release_tag": {
     "description": "视频 Release 标签名",
     "type": "string",
-    "hint": "视频作为 Release 附件上传，避免塞进 git 历史",
     "default": "tiancai-videos"
   },
   "max_public_upload_mb": {
@@ -133,5 +123,47 @@
     "type": "int",
     "hint": "GitHub 单文件硬顶 100MB，建议不超过 95",
     "default": 95
+  },
+  "cmd_collect": {
+    "description": "入库指令（逗号分隔多个别名）",
+    "type": "string",
+    "hint": "例如：收进天菜,加入天菜,天菜入库",
+    "default": "收进天菜,加入天菜,天菜入库"
+  },
+  "cmd_show": {
+    "description": "随机发送指令",
+    "type": "string",
+    "hint": "例如：看看天菜,来点天菜,天菜",
+    "default": "看看天菜,来点天菜,天菜"
+  },
+  "cmd_count": {
+    "description": "数量查询指令",
+    "type": "string",
+    "default": "天菜数量,天菜库,天菜列表"
+  },
+  "cmd_delete": {
+    "description": "删除指令",
+    "type": "string",
+    "default": "删除天菜,天菜删除"
+  },
+  "cmd_detail": {
+    "description": "详情指令",
+    "type": "string",
+    "default": "天菜详情,天菜信息"
+  },
+  "cmd_help": {
+    "description": "帮助指令",
+    "type": "string",
+    "default": "天菜帮助,天菜说明,天菜指令"
+  },
+  "cmd_clear": {
+    "description": "清空指令（仅管理员）",
+    "type": "string",
+    "default": "清空天菜"
+  },
+  "cmd_sync": {
+    "description": "同步公共源指令",
+    "type": "string",
+    "default": "同步天菜源,天菜同步,同步公共天菜"
   }
 }

@@ -4,7 +4,8 @@ Batch 1：索引 v2、权限白名单、冷却、软删除指令、降权随机
 Batch 2：WebUI 管理台（总览 / 列表 / 回收站 / 上传下载）
 Batch 3：顺序编号、默认标签「天菜」、卡片内视频预览
 Batch 4：公共天菜源（GitHub index + URL 视频，只读同步/缓存/混合抽取）
-Batch 5：可配置口令解锁发布、GitHub Token 上传 Release、代理拉取
+Batch 5：GitHub Token 上传 Release、代理拉取
+Batch 6：默认公共源、UI 改配置/指令、公共视频自动入库、开放发布、去口令
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import hmac
 import json
 import mimetypes
 import random
@@ -53,8 +53,44 @@ SAFE_ID_RE = re.compile(r"^[a-fA-F0-9]{8,64}$")
 SAFE_CODE_RE = re.compile(r"^[0-9a-fA-F]{1,64}$")
 PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 DEFAULT_GITHUB_PROXY = "https://gh-proxy.com/"
-ADMIN_UNLOCK_SECONDS = 30 * 60
+DEFAULT_PUBLIC_INDEX_URL = (
+    "https://raw.githubusercontent.com/sxd55/astrbot_plugin_tiancai/"
+    "main/public/public_index.json"
+)
 GITHUB_API = "https://api.github.com"
+
+# UI/配置可改的键（不含 secret 回显）
+CONFIG_PUBLIC_KEYS = [
+    "storage_subdir",
+    "max_videos",
+    "allow_duplicate",
+    "collect_whitelist",
+    "cooldown_seconds",
+    "recent_penalty_count",
+    "recent_penalty_weight",
+    "pinned_weight",
+    "public_enabled",
+    "public_index_url",
+    "library_mode",
+    "public_sync_hours",
+    "public_auto_import",
+    "public_weight",
+    "github_proxy",
+    "github_repo",
+    "github_branch",
+    "github_index_path",
+    "github_release_tag",
+    "max_public_upload_mb",
+    "cmd_collect",
+    "cmd_show",
+    "cmd_count",
+    "cmd_delete",
+    "cmd_detail",
+    "cmd_help",
+    "cmd_clear",
+    "cmd_sync",
+]
+CONFIG_SECRET_KEYS = ["github_token"]
 
 
 def _now() -> int:
@@ -82,7 +118,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.5.0",
+    "1.6.0",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -103,7 +139,6 @@ class TiancaiPlugin(Star):
         self._cooldowns: dict[str, float] = {}
         self._public_sync_lock = asyncio.Lock()
         self._publish_lock = asyncio.Lock()
-        self._admin_unlock_until: dict[str, float] = {}
         self._ensure_index()
         self._register_web_apis()
 
@@ -121,10 +156,9 @@ class TiancaiPlugin(Star):
             ("logs", self.api_logs, ["GET"], "审计日志"),
             ("public/status", self.api_public_status, ["GET"], "公共源状态"),
             ("public/sync", self.api_public_sync, ["POST"], "手动同步公共菜单"),
-            ("admin/status", self.api_admin_status, ["GET"], "维护者面板状态"),
-            ("admin/unlock", self.api_admin_unlock, ["POST"], "口令解锁维护面板"),
-            ("admin/lock", self.api_admin_lock, ["POST"], "锁定维护面板"),
             ("public/publish", self.api_public_publish, ["POST"], "批量发布到公共库"),
+            ("config/get", self.api_config_get, ["GET"], "读取插件配置"),
+            ("config/save", self.api_config_save, ["POST"], "保存插件配置"),
         ]
         for path, handler, methods, desc in apis:
             self.context.register_web_api(
@@ -592,64 +626,19 @@ class TiancaiPlugin(Star):
             return error_response(str(exc), status_code=500)
         return json_response(result)
 
-    async def api_admin_status(self):
-        unlocked = self._is_admin_unlocked()
-        token_ok = bool(str(self.config.get("github_token") or "").strip())
-        phrase_ok = bool(str(self.config.get("admin_passphrase") or "").strip())
-        return json_response(
-            {
-                "unlocked": unlocked,
-                "token_configured": token_ok,
-                "passphrase_configured": phrase_ok,
-                "can_publish": unlocked and token_ok and phrase_ok,
-                "repo": str(self.config.get("github_repo") or ""),
-                "branch": str(self.config.get("github_branch") or "main"),
-                "index_path": str(
-                    self.config.get("github_index_path") or "public/public_index.json"
-                ),
-                "release_tag": str(
-                    self.config.get("github_release_tag") or "tiancai-videos"
-                ),
-                "proxy": self._github_proxy_prefix(),
-                "max_upload_mb": int(self.config.get("max_public_upload_mb", 95) or 95),
-                "unlock_remain_sec": self._admin_unlock_remain(),
-            }
-        )
-
-    async def api_admin_unlock(self):
-        payload = await request.json(default={})
-        phrase = str(payload.get("passphrase") or "")
-        expected = str(self.config.get("admin_passphrase") or "")
-        if not expected:
+    async def api_public_publish(self):
+        token = str(self.config.get("github_token") or "").strip()
+        repo = str(self.config.get("github_repo") or "").strip()
+        if not token:
             return error_response(
-                "未配置 admin_passphrase。请在插件配置中设置管理口令（仅保存在你的服务器）。",
+                "未配置 github_token。请在「设置」页填写你自己的 GitHub Token。",
                 status_code=400,
             )
-        if not hmac.compare_digest(phrase, expected):
-            self._audit("admin_unlock_fail", detail=f"user={request.username}")
-            return error_response("口令错误", status_code=403)
-        key = self._admin_session_key()
-        self._admin_unlock_until[key] = time.time() + ADMIN_UNLOCK_SECONDS
-        self._audit("admin_unlock_ok", detail=f"user={request.username}")
-        return json_response(
-            {
-                "unlocked": True,
-                "expire_in": ADMIN_UNLOCK_SECONDS,
-                "can_publish": bool(str(self.config.get("github_token") or "").strip()),
-            }
-        )
-
-    async def api_admin_lock(self):
-        key = self._admin_session_key()
-        self._admin_unlock_until.pop(key, None)
-        return json_response({"unlocked": False})
-
-    async def api_public_publish(self):
-        if not self._is_admin_unlocked():
-            return error_response("维护面板未解锁", status_code=403)
-        token = str(self.config.get("github_token") or "").strip()
-        if not token:
-            return error_response("未配置 github_token", status_code=400)
+        if not repo:
+            return error_response(
+                "未配置 github_repo。请填写你自己的仓库，例如 yourname/tiancai-public。",
+                status_code=400,
+            )
 
         payload = await request.json(default={})
         ids = self._normalize_ids(payload.get("ids"))
@@ -668,26 +657,107 @@ class TiancaiPlugin(Star):
             "public_publish",
             detail=(
                 f"user={request.username};ok={result.get('published')};"
-                f"fail={result.get('failed')}"
+                f"fail={result.get('failed')};repo={repo}"
             ),
         )
         return json_response(result)
 
-    def _admin_session_key(self) -> str:
-        user = str(request.username or "dashboard")
-        host = str(getattr(request, "client_host", None) or "")
-        return f"{user}|{host}"
+    async def api_config_get(self):
+        data = {}
+        for key in CONFIG_PUBLIC_KEYS:
+            if key == "collect_whitelist":
+                data[key] = _as_str_list(self.config.get(key))
+            else:
+                data[key] = self.config.get(key)
+        # 默认值补齐
+        if not data.get("public_index_url"):
+            data["public_index_url"] = DEFAULT_PUBLIC_INDEX_URL
+        if data.get("public_enabled") is None:
+            data["public_enabled"] = True
+        if data.get("public_auto_import") is None:
+            data["public_auto_import"] = True
+        if not data.get("library_mode"):
+            data["library_mode"] = "mixed"
+        data["github_token_configured"] = bool(
+            str(self.config.get("github_token") or "").strip()
+        )
+        data["github_proxy_effective"] = self._github_proxy_prefix()
+        return json_response({"config": data})
 
-    def _is_admin_unlocked(self) -> bool:
-        key = self._admin_session_key()
-        until = self._admin_unlock_until.get(key) or 0
-        return time.time() < until
+    async def api_config_save(self):
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("invalid payload", status_code=400)
 
-    def _admin_unlock_remain(self) -> int:
-        key = self._admin_session_key()
-        until = self._admin_unlock_until.get(key) or 0
-        remain = int(until - time.time())
-        return max(remain, 0)
+        changed = []
+        for key in CONFIG_PUBLIC_KEYS + CONFIG_SECRET_KEYS:
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if key == "collect_whitelist":
+                if isinstance(value, str):
+                    value = [x.strip() for x in re.split(r"[,，\s]+", value) if x.strip()]
+                elif not isinstance(value, list):
+                    value = _as_str_list(value)
+            if key in {
+                "public_enabled",
+                "allow_duplicate",
+                "public_auto_import",
+            }:
+                value = bool(value)
+            if key in {
+                "max_videos",
+                "cooldown_seconds",
+                "recent_penalty_count",
+                "max_public_upload_mb",
+            }:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+            if key in {
+                "recent_penalty_weight",
+                "pinned_weight",
+                "public_sync_hours",
+                "public_weight",
+            }:
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+            if key == "library_mode":
+                value = str(value or "mixed").strip().lower()
+                if value not in {"local", "public", "mixed"}:
+                    value = "mixed"
+            if key.startswith("cmd_"):
+                value = str(value or "").strip()
+                if not value:
+                    continue
+            if key == "github_token":
+                # 空字符串表示不修改已有 token
+                if value is None or str(value) == "":
+                    continue
+                value = str(value).strip()
+            self.config[key] = value
+            changed.append(key)
+
+        try:
+            if hasattr(self.config, "save_config"):
+                self.config.save_config()
+        except Exception:  # noqa: BLE001
+            logger.exception("保存配置失败")
+            return error_response("save_config failed", status_code=500)
+
+        # 目录可能变更
+        self.videos_dir = self.data_dir / str(
+            self.config.get("storage_subdir", "videos") or "videos"
+        )
+        self.videos_dir.mkdir(parents=True, exist_ok=True)
+        self._audit(
+            "config_save",
+            detail=f"user={request.username};keys={','.join(changed)}",
+        )
+        return json_response({"saved": True, "changed": changed})
 
     def _normalize_ids(self, raw: Any) -> set[str]:
         """支持完整 uuid，或顺序编号（会解析成对应 uuid）。"""
@@ -750,22 +820,107 @@ class TiancaiPlugin(Star):
         }
 
     # ------------------------------------------------------------------
-    # 指令
+    # 指令（可配置文案）
     # ------------------------------------------------------------------
 
-    @filter.command("收进天菜", alias={"加入天菜", "天菜入库"})
+    def _cmd_aliases(self, key: str, default: str) -> list[str]:
+        raw = str(self.config.get(key) or default)
+        parts = [p.strip() for p in re.split(r"[,，]", raw) if p.strip()]
+        return parts or [x.strip() for x in default.split(",") if x.strip()]
+
+    def _match_cmd(self, text: str, key: str, default: str) -> tuple[bool, str]:
+        """返回 (是否匹配, 去掉指令后的参数)。支持全等或「指令 + 空格 + 参数」。"""
+        msg = (text or "").strip()
+        if not msg:
+            return False, ""
+        aliases = sorted(self._cmd_aliases(key, default), key=len, reverse=True)
+        for alias in aliases:
+            if msg == alias:
+                return True, ""
+            prefix = alias + " "
+            if msg.startswith(prefix):
+                return True, msg[len(prefix) :].strip()
+        return False, ""
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_tiancai_commands(self, event: AstrMessageEvent):
+        text = (event.message_str or "").strip()
+        if not text:
+            return
+
+        ok, _ = self._match_cmd(text, "cmd_collect", "收进天菜,加入天菜,天菜入库")
+        if ok:
+            async for r in self.collect_tiancai(event):
+                yield r
+            event.stop_event()
+            return
+
+        ok, _ = self._match_cmd(text, "cmd_show", "看看天菜,来点天菜,天菜")
+        if ok:
+            async for r in self.show_tiancai(event):
+                yield r
+            event.stop_event()
+            return
+
+        ok, _ = self._match_cmd(text, "cmd_sync", "同步天菜源,天菜同步,同步公共天菜")
+        if ok:
+            async for r in self.sync_public_cmd(event):
+                yield r
+            event.stop_event()
+            return
+
+        ok, _ = self._match_cmd(text, "cmd_count", "天菜数量,天菜库,天菜列表")
+        if ok:
+            async for r in self.tiancai_count(event):
+                yield r
+            event.stop_event()
+            return
+
+        ok, arg = self._match_cmd(text, "cmd_delete", "删除天菜,天菜删除")
+        if ok:
+            async for r in self.delete_tiancai(event, arg):
+                yield r
+            event.stop_event()
+            return
+
+        ok, arg = self._match_cmd(text, "cmd_detail", "天菜详情,天菜信息")
+        if ok:
+            async for r in self.tiancai_detail(event, arg):
+                yield r
+            event.stop_event()
+            return
+
+        ok, _ = self._match_cmd(text, "cmd_help", "天菜帮助,天菜说明,天菜指令")
+        if ok:
+            async for r in self.tiancai_help(event):
+                yield r
+            event.stop_event()
+            return
+
+        ok, _ = self._match_cmd(text, "cmd_clear", "清空天菜")
+        if ok:
+            if not event.is_admin():
+                yield event.plain_result("仅管理员可清空天菜库。")
+                event.stop_event()
+                return
+            async for r in self.clear_tiancai(event):
+                yield r
+            event.stop_event()
+            return
+
     async def collect_tiancai(self, event: AstrMessageEvent):
         """回复一条视频消息后发送本指令，将视频保存到全局天菜库。"""
+        collect_name = self._cmd_aliases("cmd_collect", "收进天菜,加入天菜,天菜入库")[0]
         if not self._can_collect(event):
             yield event.plain_result(
-                "你没有入库权限。仅 AstrBot 管理员或白名单用户可「收进天菜」。"
+                f"你没有入库权限。仅 AstrBot 管理员或白名单用户可「{collect_name}」。"
             )
             return
 
         video_comp, source_meta = await self._extract_video_from_event(event)
         if video_comp is None:
             yield event.plain_result(
-                "请先回复一条包含视频的消息，再发送「收进天菜」。"
+                f"请先回复一条包含视频的消息，再发送「{collect_name}」。"
             )
             return
 
@@ -845,7 +1000,6 @@ class TiancaiPlugin(Star):
             f"编号：#{seq}"
         )
 
-    @filter.command("看看天菜", alias={"来点天菜", "天菜"})
     async def show_tiancai(self, event: AstrMessageEvent):
         """从本地/公共天菜库随机发送一条视频（降权少重复）。"""
         cooled = self._check_cooldown(event)
@@ -858,7 +1012,7 @@ class TiancaiPlugin(Star):
             try:
                 await self._sync_public_index(force=False)
             except Exception:  # noqa: BLE001
-                logger.exception("看看天菜前同步公共源失败")
+                logger.exception("抽取前同步公共源失败")
 
         index = self._load_index()
         local_videos = self._existing_active_videos(index)
@@ -870,6 +1024,8 @@ class TiancaiPlugin(Star):
         if mode in {"public", "mixed"}:
             pool.extend(("public", v) for v in public_videos)
 
+        show_name = self._cmd_aliases("cmd_show", "看看天菜,来点天菜,天菜")[0]
+        collect_name = self._cmd_aliases("cmd_collect", "收进天菜,加入天菜,天菜入库")[0]
         if not pool:
             if mode == "public":
                 yield event.plain_result(
@@ -877,11 +1033,11 @@ class TiancaiPlugin(Star):
                 )
             elif mode == "mixed":
                 yield event.plain_result(
-                    "本地和公共库都还是空的。可先「收进天菜」，或配置公共源。"
+                    f"本地和公共库都还是空的。可先「{collect_name}」，或配置公共源。"
                 )
             else:
                 yield event.plain_result(
-                    "天菜库还是空的。回复一条群视频并发送「收进天菜」先囤一点吧。"
+                    f"天菜库还是空的。回复一条群视频并发送「{collect_name}」先囤一点吧。"
                 )
             return
 
@@ -904,8 +1060,9 @@ class TiancaiPlugin(Star):
                 yield event.chain_result([video])
                 return
 
-            # public
             video_comp = await self._resolve_public_video(chosen)
+            # 自动入库后，chosen 可能已变成本地条目；刷新 recent
+            index = self._load_index()
             recent = index.setdefault("recent_sent_ids", [])
             recent.insert(0, f"public:{chosen.get('id')}")
             keep_n = max(int(self.config.get("recent_penalty_count", 8) or 8) * 2, 16)
@@ -923,12 +1080,11 @@ class TiancaiPlugin(Star):
             logger.exception("发送天菜失败")
             yield event.plain_result(f"发送失败：{exc}")
 
-    @filter.command("同步天菜源", alias={"天菜同步", "同步公共天菜"})
     async def sync_public_cmd(self, event: AstrMessageEvent):
         """手动同步公共天菜菜单。"""
         if not self._public_enabled():
             yield event.plain_result(
-                "公共源未启用。请在插件配置打开 public_enabled 并填写 public_index_url。"
+                "公共源未启用。请在设置页打开 public_enabled 并填写 public_index_url。"
             )
             return
         try:
@@ -938,7 +1094,6 @@ class TiancaiPlugin(Star):
             logger.exception("指令同步公共源失败")
             yield event.plain_result(f"同步失败：{exc}")
 
-    @filter.command("天菜数量", alias={"天菜库", "天菜列表"})
     async def tiancai_count(self, event: AstrMessageEvent):
         """查看天菜库当前数量。"""
         index = self._load_index()
@@ -958,12 +1113,12 @@ class TiancaiPlugin(Star):
             f"{extra}\n目录：{self.videos_dir}"
         )
 
-    @filter.command("删除天菜", alias={"天菜删除"})
     async def delete_tiancai(self, event: AstrMessageEvent, code: str = ""):
-        """软删除一条天菜。用法：删除天菜 <编号>，例如：删除天菜 3"""
+        """软删除一条天菜。"""
+        delete_name = self._cmd_aliases("cmd_delete", "删除天菜,天菜删除")[0]
         code = (code or "").strip().lstrip("#")
         if not code:
-            yield event.plain_result("用法：删除天菜 <编号>，例如：删除天菜 3")
+            yield event.plain_result(f"用法：{delete_name} <编号>，例如：{delete_name} 3")
             return
 
         index = self._load_index()
@@ -995,12 +1150,12 @@ class TiancaiPlugin(Star):
             "可在 WebUI「天菜管理台」回收站恢复或永久删除。"
         )
 
-    @filter.command("天菜详情", alias={"天菜信息"})
     async def tiancai_detail(self, event: AstrMessageEvent, code: str = ""):
-        """查看一条天菜的元信息。用法：天菜详情 <编号>"""
+        """查看一条天菜的元信息。"""
+        detail_name = self._cmd_aliases("cmd_detail", "天菜详情,天菜信息")[0]
         code = (code or "").strip().lstrip("#")
         if not code:
-            yield event.plain_result("用法：天菜详情 <编号>，例如：天菜详情 3")
+            yield event.plain_result(f"用法：{detail_name} <编号>，例如：{detail_name} 3")
             return
 
         index = self._load_index()
@@ -1041,26 +1196,24 @@ class TiancaiPlugin(Star):
             f"最近抽出：{last_played}"
         )
 
-    @filter.command("天菜帮助", alias={"天菜说明", "天菜指令"})
     async def tiancai_help(self, event: AstrMessageEvent):
         """查看天菜插件指令说明。"""
+        c = lambda k, d: " / ".join(self._cmd_aliases(k, d))
         yield event.plain_result(
-            "天菜视频库指令\n"
-            "· 收进天菜：回复视频后入库（管理员/白名单），默认标签「天菜」\n"
-            "· 看看天菜：随机发一条（本地/公共/混合，见配置 library_mode）\n"
-            "· 同步天菜源：手动拉取公共菜单（需启用公共源）\n"
-            "· 天菜数量：查看本地与公共数量\n"
-            "· 删除天菜 <编号>：移入回收站，如 删除天菜 3\n"
-            "· 天菜详情 <编号>：查看元信息\n"
-            "· 清空天菜：管理员将全部在库移入回收站\n"
-            "· 天菜帮助：查看本说明\n"
+            "天菜视频库指令（可在设置页自定义）\n"
+            f"· {c('cmd_collect', '收进天菜,加入天菜,天菜入库')}：回复视频后入库\n"
+            f"· {c('cmd_show', '看看天菜,来点天菜,天菜')}：随机发一条\n"
+            f"· {c('cmd_sync', '同步天菜源,天菜同步,同步公共天菜')}：同步公共菜单\n"
+            f"· {c('cmd_count', '天菜数量,天菜库,天菜列表')}：查看数量\n"
+            f"· {c('cmd_delete', '删除天菜,天菜删除')} <编号>：移入回收站\n"
+            f"· {c('cmd_detail', '天菜详情,天菜信息')} <编号>：查看元信息\n"
+            f"· {c('cmd_clear', '清空天菜')}：管理员清空到回收站\n"
+            f"· {c('cmd_help', '天菜帮助,天菜说明,天菜指令')}：本说明\n"
             "\n"
-            "公共库：维护者上传到 R2 + GitHub 菜单；用户只读。\n"
-            "详见 docs/PUBLIC_LIBRARY.md"
+            "公共库：配置 Token 后可在管理台发布到你自己的 GitHub 仓库。\n"
+            "教程：docs/SETUP_PUBLIC_REPO.md"
         )
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("清空天菜")
     async def clear_tiancai(self, event: AstrMessageEvent):
         """管理员：将全部在库天菜移入回收站（软删除）。"""
         index = self._load_index()
@@ -1169,15 +1322,20 @@ class TiancaiPlugin(Star):
     # ------------------------------------------------------------------
 
     def _public_enabled(self) -> bool:
-        if not bool(self.config.get("public_enabled", False)):
+        # 默认启用；仅当显式关闭时禁用
+        if "public_enabled" not in self.config:
+            enabled = True
+        else:
+            enabled = bool(self.config.get("public_enabled", True))
+        if not enabled:
             return False
-        url = str(self.config.get("public_index_url") or "").strip()
+        url = str(self.config.get("public_index_url") or DEFAULT_PUBLIC_INDEX_URL).strip()
         return url.startswith("http://") or url.startswith("https://")
 
     def _library_mode(self) -> str:
-        mode = str(self.config.get("library_mode") or "local").strip().lower()
+        mode = str(self.config.get("library_mode") or "mixed").strip().lower()
         if mode not in {"local", "public", "mixed"}:
-            return "local"
+            return "mixed"
         if mode in {"public", "mixed"} and not self._public_enabled():
             return "local"
         return mode
@@ -1188,8 +1346,10 @@ class TiancaiPlugin(Star):
         return {
             "enabled": self._public_enabled(),
             "mode": self._library_mode(),
-            "index_url": str(self.config.get("public_index_url") or ""),
-            "cache_enabled": bool(self.config.get("public_cache_enabled", True)),
+            "index_url": str(
+                self.config.get("public_index_url") or DEFAULT_PUBLIC_INDEX_URL
+            ),
+            "auto_import": bool(self.config.get("public_auto_import", True)),
             "sync_hours": float(self.config.get("public_sync_hours", 12) or 12),
             "public_count": len(videos),
             "last_sync_at": meta.get("last_sync_at"),
@@ -1198,6 +1358,7 @@ class TiancaiPlugin(Star):
             "name": meta.get("name") or "",
             "proxy": self._github_proxy_prefix(),
             "repo": str(self.config.get("github_repo") or ""),
+            "token_configured": bool(str(self.config.get("github_token") or "").strip()),
         }
 
     def _load_public_meta(self) -> dict[str, Any]:
@@ -1275,7 +1436,9 @@ class TiancaiPlugin(Star):
                     ),
                 }
 
-            url = str(self.config.get("public_index_url") or "").strip()
+            url = str(
+                self.config.get("public_index_url") or DEFAULT_PUBLIC_INDEX_URL
+            ).strip()
             fetch_url = self._with_github_proxy(url)
             try:
                 text = await asyncio.to_thread(self._http_get_text, fetch_url)
@@ -1685,23 +1848,99 @@ class TiancaiPlugin(Star):
         if not url.startswith(("http://", "https://")):
             raise ValueError("公共条目缺少有效 url")
 
-        cache_on = bool(self.config.get("public_cache_enabled", True))
+        auto_import = bool(self.config.get("public_auto_import", True))
         vid = str(item.get("id") or "unknown")
         suffix = Path(urlparse(url).path).suffix.lower()
         if suffix not in VIDEO_SUFFIXES:
             suffix = ".mp4"
+
+        # 已导入过同一公共 id？
+        index = self._load_index()
+        for local in index.get("videos", []):
+            if (
+                isinstance(local, dict)
+                and local.get("deleted_at") is None
+                and str(local.get("source_public_id") or "") == vid
+            ):
+                path = self.videos_dir / str(local.get("filename") or "")
+                if path.is_file():
+                    local["play_count"] = int(local.get("play_count") or 0) + 1
+                    local["last_played_at"] = _now()
+                    self._save_index(index)
+                    return Video.fromFileSystem(path=str(path))
+
         cache_path = self.public_cache_dir / f"{vid}{suffix}"
-
-        if cache_on and cache_path.is_file() and cache_path.stat().st_size > 0:
-            return Video.fromFileSystem(path=str(cache_path))
-
-        fetch_url = self._with_github_proxy(url)
-        if cache_on:
+        if not (cache_path.is_file() and cache_path.stat().st_size > 0):
             await asyncio.to_thread(self._http_download, url, cache_path)
-            if cache_path.is_file() and cache_path.stat().st_size > 0:
-                return Video.fromFileSystem(path=str(cache_path))
+        if not (cache_path.is_file() and cache_path.stat().st_size > 0):
+            # 回退 URL 发送
+            return Video.fromURL(url=self._with_github_proxy(url))
 
-        return Video.fromURL(url=fetch_url)
+        if auto_import:
+            imported = self._import_cached_public_video(item, cache_path)
+            if imported is not None:
+                path = self.videos_dir / str(imported.get("filename") or "")
+                if path.is_file():
+                    return Video.fromFileSystem(path=str(path))
+
+        return Video.fromFileSystem(path=str(cache_path))
+
+    def _import_cached_public_video(
+        self, public_item: dict[str, Any], cache_path: Path
+    ) -> dict[str, Any] | None:
+        """把已下载的公共视频写入本地库。"""
+        try:
+            index = self._load_index()
+            pub_id = str(public_item.get("id") or "")
+            for local in index.get("videos", []):
+                if (
+                    isinstance(local, dict)
+                    and local.get("deleted_at") is None
+                    and str(local.get("source_public_id") or "") == pub_id
+                ):
+                    return local
+
+            max_videos = int(self.config.get("max_videos", 0) or 0)
+            if max_videos > 0 and len(self._active_videos(index)) >= max_videos:
+                logger.warning("本地库已满，跳过公共视频自动导入")
+                return None
+
+            suffix = cache_path.suffix.lower() or ".mp4"
+            video_id = uuid.uuid4().hex
+            dest = self.videos_dir / f"{video_id}{suffix}"
+            shutil.copy2(cache_path, dest)
+            seq = self._next_seq(index)
+            record = self._new_record(
+                video_id=video_id,
+                filename=dest.name,
+                size=dest.stat().st_size,
+                source_message_id="",
+                source_group_id="",
+                collector_id="public-import",
+                collector_name="公共源自动导入",
+                seq=seq,
+            )
+            record["source_public_id"] = pub_id
+            record["note"] = str(public_item.get("title") or f"公共#{public_item.get('seq') or ''}")[
+                :200
+            ]
+            tags = public_item.get("tags")
+            if isinstance(tags, list) and tags:
+                record["tags"] = [str(t)[:32] for t in tags][:20]
+            record["play_count"] = 1
+            record["last_played_at"] = _now()
+            index.setdefault("videos", []).append(record)
+            index["next_seq"] = seq + 1
+            self._save_index(index)
+            self._audit(
+                "public_auto_import",
+                video_id=video_id,
+                detail=f"public_id={pub_id};seq={seq}",
+            )
+            return record
+        except Exception:  # noqa: BLE001
+            logger.exception("公共视频自动导入失败")
+            return None
 
     # ------------------------------------------------------------------
     # 视频提取

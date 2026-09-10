@@ -9,9 +9,36 @@ const state = {
   selected: new Set(),
   stats: null,
   itemsById: new Map(),
-  adminUnlocked: false,
   canPublish: false,
+  config: null,
 };
+
+const SETTINGS_FIELDS = [
+  ["public_enabled", "启用公共源", "bool"],
+  ["public_index_url", "公共菜单 URL", "text"],
+  ["library_mode", "抽取模式 (local/public/mixed)", "text"],
+  ["public_sync_hours", "同步间隔小时", "number"],
+  ["public_auto_import", "公共视频自动导入本地库", "bool"],
+  ["public_weight", "mixed 公共权重", "number"],
+  ["github_proxy", "GitHub 代理（留空=gh-proxy.com）", "text"],
+  ["github_token", "GitHub Token（发布用，不回显）", "password"],
+  ["github_repo", "你的仓库 owner/repo", "text"],
+  ["github_branch", "分支", "text"],
+  ["github_index_path", "菜单路径", "text"],
+  ["github_release_tag", "Release 标签", "text"],
+  ["max_public_upload_mb", "上传大小上限 MB", "number"],
+  ["cooldown_seconds", "抽取冷却秒数", "number"],
+  ["max_videos", "本地库上限（0不限）", "number"],
+  ["collect_whitelist", "入库白名单（逗号分隔）", "text"],
+  ["cmd_collect", "入库指令", "text"],
+  ["cmd_show", "随机发送指令", "text"],
+  ["cmd_sync", "同步指令", "text"],
+  ["cmd_count", "数量指令", "text"],
+  ["cmd_delete", "删除指令", "text"],
+  ["cmd_detail", "详情指令", "text"],
+  ["cmd_help", "帮助指令", "text"],
+  ["cmd_clear", "清空指令", "text"],
+];
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
@@ -26,7 +53,6 @@ function toast(msg, ms = 2400) {
   }, ms);
 }
 
-/** iframe 沙箱通常没有 allow-modals，window.confirm 会静默失败，必须用页面内对话框。 */
 function askConfirm(message, title = "确认操作") {
   return new Promise((resolve) => {
     const dialog = $("#confirmDialog");
@@ -38,10 +64,8 @@ function askConfirm(message, title = "确认操作") {
       resolve(true);
       return;
     }
-
     titleEl.textContent = title;
     msgEl.textContent = message;
-
     const cleanup = () => {
       form.removeEventListener("submit", onSubmit);
       cancelBtn.removeEventListener("click", onCancel);
@@ -62,7 +86,6 @@ function askConfirm(message, title = "确认操作") {
       cleanup();
       resolve(false);
     };
-
     form.addEventListener("submit", onSubmit);
     cancelBtn.addEventListener("click", onCancel);
     dialog.addEventListener("close", onClose, { once: true });
@@ -97,6 +120,8 @@ function setTab(name) {
     loadLibrary();
   } else if (name === "logs") {
     loadLogs();
+  } else if (name === "settings") {
+    loadSettings();
   } else {
     loadStats();
   }
@@ -107,17 +132,17 @@ async function loadStats() {
   try {
     const stats = await bridge.apiGet("stats");
     state.stats = stats;
+    const pub = stats.public || {};
     $("#subtitle").textContent =
-      `在库 ${stats.active_count} · 回收站 ${stats.trash_count} · ${stats.total_size_human}`;
+      `在库 ${stats.active_count} · 回收站 ${stats.trash_count} · 公共 ${pub.public_count || 0} · ${stats.total_size_human}`;
     $("#videosDir").textContent = stats.videos_dir || "—";
-
     const cards = [
       ["在库", stats.active_count],
       ["回收站", stats.trash_count],
+      ["公共源", pub.public_count || 0],
       ["占用", stats.total_size_human],
       ["今日入库", stats.collected_today],
       ["今日抽出", stats.played_today],
-      ["冷却(秒)", stats.cooldown_seconds],
     ];
     $("#statCards").innerHTML = cards
       .map(
@@ -128,9 +153,16 @@ async function loadStats() {
       </div>`,
       )
       .join("");
-
     renderMini("#recentCollected", stats.recent_collected || [], "saved_at_human");
     renderMini("#recentPlayed", stats.recent_played || [], "last_played_at_human");
+    const summary = $("#publicSummary");
+    if (summary) {
+      summary.textContent = pub.enabled
+        ? `已启用 · 模式 ${pub.mode || "-"} · ${pub.index_url || ""}\n代理 ${pub.proxy || "-"} · 自动导入 ${pub.auto_import ? "开" : "关"}`
+        : "公共源未启用";
+    }
+    state.canPublish = !!pub.token_configured && !!(pub.repo || "").trim();
+    updateBatchButtons();
   } catch (err) {
     toast(`加载总览失败：${err.message || err}`);
   }
@@ -160,10 +192,8 @@ async function loadLibrary() {
   const listId = state.scope === "trash" ? "#trashList" : "#libraryList";
   const box = $(listId);
   box.innerHTML = `<div class="empty">加载中…</div>`;
-
   const q = $("#searchQ")?.value?.trim() || "";
   const sort = $("#sortBy")?.value || "seq";
-
   try {
     const data = await bridge.apiGet("videos", {
       scope: state.scope,
@@ -179,9 +209,7 @@ async function loadLibrary() {
     if (!items.length) {
       box.classList.add("empty");
       box.textContent =
-        state.scope === "trash"
-          ? "回收站为空"
-          : "视频库为空，可上传或在群里「收进天菜」";
+        state.scope === "trash" ? "回收站为空" : "视频库为空，可上传或抽取公共视频自动导入";
       updatePager();
       updateBatchButtons();
       return;
@@ -199,14 +227,11 @@ async function loadLibrary() {
 
 function renderCard(item) {
   const checked = state.selected.has(item.id) ? "checked" : "";
-  const tags = (item.tags || [])
-    .map((t) => `<span class="tag">${esc(t)}</span>`)
-    .join("");
+  const tags = (item.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
   const pin = item.pinned ? `<span class="pin">置顶</span>` : "";
   const missing = item.file_exists ? "" : "missing";
   const note = item.note || "无备注";
   const num = item.seq ? `#${item.seq}` : item.id_short || String(item.id).slice(0, 8);
-
   const actions =
     state.scope === "trash"
       ? `
@@ -219,14 +244,7 @@ function renderCard(item) {
         <button type="button" data-act="download" data-id="${esc(item.id)}" data-name="${esc(item.filename || "video.mp4")}">下载</button>
         <button type="button" class="danger" data-act="delete" data-id="${esc(item.id)}">回收站</button>
       `;
-
   const previewDisabled = item.file_exists ? "" : "disabled";
-  const previewHint = item.file_exists
-    ? item.can_preview === false
-      ? "文件较大，点击尝试预览"
-      : "点击播放预览"
-    : "文件缺失";
-
   return `<article class="v-card ${missing}" data-id="${esc(item.id)}">
     <div class="v-body">
       <div class="v-main">
@@ -237,7 +255,7 @@ function renderCard(item) {
             <div class="v-meta">
               ${esc(item.size_human)} · 抽中 ${esc(item.play_count)} 次<br/>
               入库 ${esc(item.saved_at_human || "—")}<br/>
-              ${item.collector_name ? `收藏人 ${esc(item.collector_name)}` : "Web/未知来源"}
+              ${item.collector_name ? `收藏人 ${esc(item.collector_name)}` : "未知来源"}
               ${item.file_exists ? "" : " · 文件缺失"}
             </div>
           </div>
@@ -246,7 +264,7 @@ function renderCard(item) {
         <div class="tags">${tags || `<span class="tag">天菜</span>`}</div>
         <div class="v-actions">${actions}</div>
       </div>
-      <button type="button" class="preview-box" data-act="preview" data-id="${esc(item.id)}" ${previewDisabled} title="${esc(previewHint)}">
+      <button type="button" class="preview-box" data-act="preview" data-id="${esc(item.id)}" ${previewDisabled} title="点击播放预览">
         <span class="preview-placeholder">
           <span class="play-icon">▶</span>
           <span>预览</span>
@@ -265,7 +283,6 @@ function bindCardEvents(box) {
       updateBatchButtons();
     });
   });
-
   box.querySelectorAll("[data-act]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const act = btn.getAttribute("data-act");
@@ -280,20 +297,13 @@ function bindCardEvents(box) {
           toast("已恢复");
           await refreshCurrent();
         } else if (act === "purge") {
-          const ok = await askConfirm(
-            "确定永久删除这条视频？\n此操作不可恢复。",
-            "永久删除",
-          );
-          if (!ok) {
-            toast("已取消删除");
-            return;
-          }
+          const ok = await askConfirm("确定永久删除这条视频？\n此操作不可恢复。", "永久删除");
+          if (!ok) return;
           await bridge.apiPost("videos/purge", { ids: [id] });
           toast("已永久删除");
           await refreshCurrent();
         } else if (act === "download") {
-          const name =
-            btn.getAttribute("data-name") || `tiancai_${id.slice(0, 8)}.mp4`;
+          const name = btn.getAttribute("data-name") || `tiancai_${id.slice(0, 8)}.mp4`;
           await bridge.download("videos/download", { id }, name);
           toast("开始下载");
         } else if (act === "edit") {
@@ -314,8 +324,6 @@ async function openPreview(id, btn) {
     toast("文件不存在，无法预览");
     return;
   }
-
-  // 已加载过则直接播放
   if (btn.dataset.loaded === "1") {
     const video = btn.querySelector("video");
     if (video) {
@@ -324,11 +332,9 @@ async function openPreview(id, btn) {
     }
     return;
   }
-
   btn.classList.add("loading");
   const ph = btn.querySelector(".preview-placeholder");
   if (ph) ph.innerHTML = `<span>加载中…</span>`;
-
   try {
     const media = await bridge.apiGet("videos/media", { id });
     if (!media?.data_url) throw new Error("无预览数据");
@@ -338,27 +344,15 @@ async function openPreview(id, btn) {
     video.playsInline = true;
     video.preload = "metadata";
     video.src = media.data_url;
-    video.addEventListener(
-      "click",
-      (e) => {
-        // 避免冒泡到 button 再次触发
-        e.stopPropagation();
-      },
-      true,
-    );
+    video.addEventListener("click", (e) => e.stopPropagation(), true);
     btn.appendChild(video);
     btn.dataset.loaded = "1";
     btn.classList.add("has-video");
     video.play().catch(() => {});
   } catch (err) {
     const msg = String(err.message || err);
-    if (msg.includes("too large") || msg.includes("413")) {
-      toast("文件较大，请用「下载」查看");
-      if (ph) ph.innerHTML = `<span class="play-icon">⬇</span><span>请下载</span>`;
-    } else {
-      toast(`预览失败：${msg}`);
-      if (ph) ph.innerHTML = `<span class="play-icon">▶</span><span>预览</span>`;
-    }
+    toast(msg.includes("too large") || msg.includes("413") ? "文件较大，请用下载" : `预览失败：${msg}`);
+    if (ph) ph.innerHTML = `<span class="play-icon">▶</span><span>预览</span>`;
   } finally {
     btn.classList.remove("loading");
   }
@@ -373,38 +367,12 @@ function updateBatchButtons() {
   if (del) del.disabled = n === 0 || state.scope !== "active";
   if (restore) restore.disabled = n === 0 || state.scope !== "trash";
   if (purge) purge.disabled = n === 0 || state.scope !== "trash";
-  if (publish) {
-    publish.hidden = !state.adminUnlocked;
-    publish.disabled = !state.canPublish || n === 0 || state.scope !== "active";
-  }
-}
-
-async function refreshAdminStatus() {
-  try {
-    const st = await bridge.apiGet("admin/status");
-    state.adminUnlocked = !!st.unlocked;
-    state.canPublish = !!st.can_publish;
-    const bar = $("#adminBar");
-    const text = $("#adminBarText");
-    const lockBtn = $("#btnAdminLock");
-    const publish = $("#btnPublishGithub");
-    if (bar) bar.hidden = !state.adminUnlocked;
-    if (lockBtn) lockBtn.hidden = !state.adminUnlocked;
-    if (publish) publish.hidden = !state.adminUnlocked;
-    if (text) {
-      if (!st.passphrase_configured) {
-        text.textContent = "未配置 admin_passphrase，无法解锁维护面板";
-      } else if (!st.token_configured) {
-        text.textContent = `已解锁（${st.unlock_remain_sec || 0}s）· 未配置 github_token，无法发布`;
-      } else if (state.adminUnlocked) {
-        text.textContent = `维护面板已解锁（剩余 ${st.unlock_remain_sec || 0}s）· 可发布到 ${st.repo || "仓库"}`;
-      } else {
-        text.textContent = "维护面板未解锁";
-      }
-    }
-    updateBatchButtons();
-  } catch (err) {
-    console.warn("admin status failed", err);
+  if (publish) publish.disabled = !state.canPublish || n === 0 || state.scope !== "active";
+  const hint = $("#publishHint");
+  if (hint) {
+    hint.textContent = state.canPublish
+      ? "已配置 Token 与仓库：勾选本地视频后可发布到你自己的 GitHub 公共库。"
+      : "请先在「设置」填写 github_token 与 github_repo（你自己的仓库），才能发布。";
   }
 }
 
@@ -419,11 +387,15 @@ async function refreshCurrent() {
   state.selected.clear();
   if (state.tab === "overview") await loadStats();
   else if (state.tab === "logs") await loadLogs();
+  else if (state.tab === "settings") await loadSettings();
   else await loadLibrary();
   try {
     const stats = await bridge.apiGet("stats");
+    const pub = stats.public || {};
     $("#subtitle").textContent =
-      `在库 ${stats.active_count} · 回收站 ${stats.trash_count} · ${stats.total_size_human}`;
+      `在库 ${stats.active_count} · 回收站 ${stats.trash_count} · 公共 ${pub.public_count || 0} · ${stats.total_size_human}`;
+    state.canPublish = !!pub.token_configured && !!(pub.repo || "").trim();
+    updateBatchButtons();
   } catch {
     /* ignore */
   }
@@ -465,15 +437,9 @@ function formatTs(raw) {
 
 async function openEdit(id) {
   try {
-    const item = state.itemsById.get(id);
-    let target = item;
+    let target = state.itemsById.get(id);
     if (!target) {
-      const data = await bridge.apiGet("videos", {
-        scope: "all",
-        q: id,
-        page: 1,
-        page_size: 20,
-      });
+      const data = await bridge.apiGet("videos", { scope: "all", q: id, page: 1, page_size: 20 });
       target = (data.items || []).find((x) => x.id === id);
     }
     if (!target) {
@@ -492,12 +458,13 @@ async function openEdit(id) {
 
 async function saveEdit(ev) {
   ev.preventDefault();
-  const id = $("#editId").value;
-  const note = $("#editNote").value;
-  const tags = $("#editTags").value;
-  const pinned = $("#editPinned").checked;
   try {
-    await bridge.apiPost("videos/update", { id, note, tags, pinned });
+    await bridge.apiPost("videos/update", {
+      id: $("#editId").value,
+      note: $("#editNote").value,
+      tags: $("#editTags").value,
+      pinned: $("#editPinned").checked,
+    });
     $("#editDialog").close();
     toast("已保存");
     await refreshCurrent();
@@ -511,8 +478,7 @@ async function onUpload(file) {
   toast(`上传中：${file.name}`);
   try {
     const result = await bridge.upload("videos/upload", file);
-    const seq = result?.item?.seq;
-    toast(seq ? `上传成功 #${seq}` : "上传成功");
+    toast(result?.item?.seq ? `上传成功 #${result.item.seq}` : "上传成功");
     await refreshCurrent();
     if (state.tab !== "library") setTab("library");
   } catch (err) {
@@ -520,11 +486,59 @@ async function onUpload(file) {
   }
 }
 
-function wire() {
-  $$(".tab").forEach((btn) => {
-    btn.addEventListener("click", () => setTab(btn.dataset.tab));
-  });
+async function loadSettings() {
+  const form = $("#settingsForm");
+  if (!form) return;
+  form.innerHTML = `<div class="hint">加载中…</div>`;
+  try {
+    const data = await bridge.apiGet("config/get");
+    state.config = data.config || {};
+    const cfg = state.config;
+    form.innerHTML = SETTINGS_FIELDS.map(([key, label, type]) => {
+      let value = cfg[key];
+      if (key === "collect_whitelist" && Array.isArray(value)) value = value.join(",");
+      if (key === "github_token") {
+        return `<label>${esc(label)}
+          <input name="${esc(key)}" type="password" placeholder="${cfg.github_token_configured ? "已配置（留空不修改）" : "粘贴你的 PAT"}" />
+        </label>`;
+      }
+      if (type === "bool") {
+        return `<label class="check"><input name="${esc(key)}" type="checkbox" ${value ? "checked" : ""}/> ${esc(label)}</label>`;
+      }
+      return `<label>${esc(label)}
+        <input name="${esc(key)}" type="${type === "number" ? "number" : "text"}" value="${esc(value ?? "")}" />
+      </label>`;
+    }).join("");
+  } catch (err) {
+    form.innerHTML = `<div class="hint">加载失败：${esc(err.message || err)}</div>`;
+  }
+}
 
+async function saveSettings() {
+  const form = $("#settingsForm");
+  if (!form) return;
+  const payload = {};
+  SETTINGS_FIELDS.forEach(([key, , type]) => {
+    const el = form.querySelector(`[name="${key}"]`);
+    if (!el) return;
+    if (type === "bool") payload[key] = !!el.checked;
+    else if (key === "github_token") {
+      if (el.value) payload[key] = el.value;
+    } else if (type === "number") payload[key] = el.value === "" ? 0 : Number(el.value);
+    else payload[key] = el.value;
+  });
+  try {
+    const result = await bridge.apiPost("config/save", payload);
+    toast(`已保存 ${result.changed?.length || 0} 项配置`);
+    await loadSettings();
+    await loadStats();
+  } catch (err) {
+    toast(`保存失败：${err.message || err}`);
+  }
+}
+
+function wire() {
+  $$(".tab").forEach((btn) => btn.addEventListener("click", () => setTab(btn.dataset.tab)));
   $("#btnRefresh")?.addEventListener("click", () => refreshCurrent());
   $("#btnSearch")?.addEventListener("click", () => {
     state.page = 1;
@@ -540,7 +554,6 @@ function wire() {
     state.page = 1;
     loadLibrary();
   });
-
   $("#btnPrev")?.addEventListener("click", () => {
     if (state.page > 1) {
       state.page -= 1;
@@ -573,80 +586,35 @@ function wire() {
       toast("请先勾选要发布的视频");
       return;
     }
-    if (!state.adminUnlocked) {
-      toast("请先点击右上角「维护」并输入口令解锁");
-      return;
-    }
     if (!state.canPublish) {
-      toast("未配置 github_token，无法发布。请到插件配置填写 Token 后重载。");
+      toast("请先在设置页填写 github_token 与 github_repo");
       return;
     }
     const ok = await askConfirm(
-      `将选中的 ${ids.length} 条发布到 GitHub 公共库？\n视频会上传到 Release，并更新 public_index.json。`,
+      `将选中的 ${ids.length} 条发布到你自己的 GitHub 公共库？\n视频上传到 Release，并更新 public_index.json。`,
       "发布到公共库",
     );
     if (!ok) {
       toast("已取消发布");
       return;
     }
-
     const btn = $("#btnPublishGithub");
     if (btn) btn.disabled = true;
     toast("正在发布到公共库，请稍候…", 8000);
     try {
       const result = await bridge.apiPost("public/publish", { ids });
-      const errHint = result.errors?.length
-        ? `\n失败详情见控制台（共 ${result.errors.length} 条）`
-        : "";
       toast(
-        `发布完成：成功 ${result.published || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}${errHint}`,
+        `发布完成：成功 ${result.published || 0}，跳过 ${result.skipped || 0}，失败 ${result.failed || 0}`,
         5000,
       );
-      if (result.errors?.length) {
-        console.warn("publish errors", result.errors);
-      }
+      if (result.errors?.length) console.warn("publish errors", result.errors);
       state.selected.clear();
       await refreshCurrent();
-      await refreshAdminStatus();
     } catch (err) {
       toast(`发布失败：${err.message || err}`, 5000);
-      console.error("publish failed", err);
+      console.error(err);
     } finally {
       updateBatchButtons();
-    }
-  });
-
-  $("#btnAdminEntry")?.addEventListener("click", async () => {
-    await refreshAdminStatus();
-    if (state.adminUnlocked) {
-      toast("维护面板已解锁");
-      return;
-    }
-    $("#adminPass").value = "";
-    $("#adminDialog").showModal();
-  });
-
-  $("#adminCancel")?.addEventListener("click", () => $("#adminDialog").close());
-  $("#adminForm")?.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const passphrase = $("#adminPass").value || "";
-    try {
-      await bridge.apiPost("admin/unlock", { passphrase });
-      $("#adminDialog").close();
-      toast("维护面板已解锁");
-      await refreshAdminStatus();
-    } catch (err) {
-      toast(`解锁失败：${err.message || err}`);
-    }
-  });
-
-  $("#btnAdminLock")?.addEventListener("click", async () => {
-    try {
-      await bridge.apiPost("admin/lock", {});
-      toast("已锁定维护面板");
-      await refreshAdminStatus();
-    } catch (err) {
-      toast(`锁定失败：${err.message || err}`);
     }
   });
 
@@ -664,18 +632,9 @@ function wire() {
 
   $("#btnBatchPurge")?.addEventListener("click", async () => {
     const ids = [...state.selected];
-    if (!ids.length) {
-      toast("请先勾选要删除的视频");
-      return;
-    }
-    const ok = await askConfirm(
-      `确定永久删除 ${ids.length} 条？\n此操作不可恢复。`,
-      "永久删除",
-    );
-    if (!ok) {
-      toast("已取消删除");
-      return;
-    }
+    if (!ids.length) return;
+    const ok = await askConfirm(`确定永久删除 ${ids.length} 条？\n此操作不可恢复。`, "永久删除");
+    if (!ok) return;
     try {
       await bridge.apiPost("videos/purge", { ids });
       toast(`已永久删除 ${ids.length} 条`);
@@ -691,9 +650,10 @@ function wire() {
     e.target.value = "";
     await onUpload(file);
   });
-
   $("#editForm")?.addEventListener("submit", saveEdit);
   $("#editCancel")?.addEventListener("click", () => $("#editDialog").close());
+  $("#btnSaveSettings")?.addEventListener("click", saveSettings);
+  $("#btnReloadSettings")?.addEventListener("click", loadSettings);
 }
 
 async function boot() {
@@ -709,7 +669,6 @@ async function boot() {
   } catch (err) {
     console.warn("bridge ready failed", err);
   }
-  await refreshAdminStatus();
   await loadStats();
 }
 

@@ -3,7 +3,7 @@ Set-Location -LiteralPath $PSScriptRoot
 
 $RemoteUrl = "https://github.com/sxd55/astrbot_plugin_tiancai.git"
 $LogFile = Join-Path $PSScriptRoot "push_log.txt"
-$CommitMsg = "fix: replace iframe confirm() with in-page dialog for publish"
+$CommitMsg = "feat(v1.6.0): default public source, UI settings, cmd aliases, auto-import, open publish"
 
 function Write-Log([string]$Message) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
@@ -19,7 +19,15 @@ function Fail([string]$Message) {
 }
 
 Add-Content -LiteralPath $LogFile -Value "" -Encoding UTF8
-Write-Log "Push Batch5 start"
+Write-Log "Push Batch6 start"
+
+# ensure logo
+$logoSrc = "C:\Users\24122\AppData\Local\Claude-3p\local-agent-mode-sessions\a1678ef5\00000000\a865ea4d\uploads\0ee926631c1b369d3bc3a340898b9012.png"
+$logoDst = Join-Path $PSScriptRoot "logo.png"
+if (-not (Test-Path $logoDst) -and (Test-Path $logoSrc)) {
+    Copy-Item -LiteralPath $logoSrc -Destination $logoDst -Force
+    Write-Log "copied logo.png"
+}
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Fail "git not found" }
 if (-not (Test-Path ".git")) { Fail ".git missing" }
@@ -32,6 +40,7 @@ if (-not $email) { git config user.email "sxd55@users.noreply.github.com" | Out-
 git config http.version HTTP/1.1 2>$null | Out-Null
 git config http.postBuffer 524288000 2>$null | Out-Null
 git rm --cached -f push_log.txt 2>$null | Out-Null
+git rm --cached -f copy_logo.bat 2>$null | Out-Null
 
 $prevEap = $ErrorActionPreference
 $ErrorActionPreference = "SilentlyContinue"
@@ -72,6 +81,6 @@ if (-not $ok) { Fail "git push failed after 3 tries" }
 
 Write-Log "SUCCESS"
 Write-Host "Done: $RemoteUrl"
-Write-Host "Version: v1.5.0 Batch5"
+Write-Host "Version: v1.6.0 Batch6"
 Read-Host "Press Enter to exit"
 exit 0

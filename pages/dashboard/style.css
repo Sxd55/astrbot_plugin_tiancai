@@ -563,12 +563,36 @@ dialog::backdrop {
   margin: 0;
 }
 
-.edit-form label {
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.settings-form label {
   display: flex;
   flex-direction: column;
   gap: 6px;
   font-size: 0.88rem;
   color: var(--muted);
+}
+
+.settings-form label.check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+}
+
+.settings-form input[type="text"],
+.settings-form input[type="number"],
+.settings-form input[type="password"] {
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+  border-radius: 12px;
+  padding: 0.55rem 0.8rem;
 }
 
 .edit-form label.check {

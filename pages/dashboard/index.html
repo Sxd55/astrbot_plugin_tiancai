@@ -22,7 +22,6 @@
             上传到本地
           </label>
           <button type="button" class="ghost" id="btnRefresh">刷新</button>
-          <button type="button" class="ghost" id="btnAdminEntry">维护</button>
         </div>
       </header>
 
@@ -30,6 +29,7 @@
         <button type="button" class="tab active" data-tab="overview">总览</button>
         <button type="button" class="tab" data-tab="library">视频库</button>
         <button type="button" class="tab" data-tab="trash">回收站</button>
+        <button type="button" class="tab" data-tab="settings">设置</button>
         <button type="button" class="tab" data-tab="logs">日志</button>
       </nav>
 
@@ -50,6 +50,10 @@
             <h2>存储路径</h2>
             <code id="videosDir">—</code>
           </div>
+          <div class="card path-card">
+            <h2>公共源</h2>
+            <div id="publicSummary" class="hint">加载中…</div>
+          </div>
         </section>
 
         <section id="panel-library" class="panel">
@@ -64,13 +68,10 @@
             </select>
             <button type="button" class="ghost" id="btnSearch">筛选</button>
             <div class="spacer"></div>
-            <button type="button" class="primary" id="btnPublishGithub" hidden disabled>发布到公共库</button>
+            <button type="button" class="primary" id="btnPublishGithub" disabled>发布到公共库</button>
             <button type="button" class="danger" id="btnBatchDelete" disabled>移入回收站</button>
           </div>
-          <div id="adminBar" class="admin-bar" hidden>
-            <span id="adminBarText">维护面板未解锁</span>
-            <button type="button" class="ghost" id="btnAdminLock" hidden>锁定</button>
-          </div>
+          <div id="publishHint" class="admin-bar">填写设置页的 github_token 与 github_repo 后，即可把本地视频发布到你自己的仓库。</div>
           <div id="libraryList" class="video-grid"></div>
           <div class="pager">
             <button type="button" class="ghost" id="btnPrev">上一页</button>
@@ -87,6 +88,18 @@
             <button type="button" class="danger" id="btnBatchPurge" disabled>永久删除</button>
           </div>
           <div id="trashList" class="video-grid"></div>
+        </section>
+
+        <section id="panel-settings" class="panel">
+          <div class="card">
+            <h2>插件设置</h2>
+            <p class="hint">修改后点保存。指令支持逗号分隔多个别名，例如：看看天菜,来点天菜,天菜</p>
+            <form id="settingsForm" class="settings-form"></form>
+            <div class="dialog-actions" style="margin-top: 12px">
+              <button type="button" class="ghost" id="btnReloadSettings">重新加载</button>
+              <button type="button" class="primary" id="btnSaveSettings">保存设置</button>
+            </div>
+          </div>
         </section>
 
         <section id="panel-logs" class="panel">
@@ -113,26 +126,11 @@
           </label>
           <label class="check">
             <input id="editPinned" type="checkbox" />
-            置顶（提高「看看天菜」权重）
+            置顶（提高抽取权重）
           </label>
           <div class="dialog-actions">
             <button type="button" class="ghost" id="editCancel">取消</button>
             <button type="submit" class="primary">保存</button>
-          </div>
-        </form>
-      </dialog>
-
-      <dialog id="adminDialog">
-        <form method="dialog" id="adminForm" class="edit-form">
-          <h3>解锁维护面板</h3>
-          <p class="hint">口令仅保存在你的服务器插件配置中，不会写进开源代码。</p>
-          <label>
-            管理口令
-            <input id="adminPass" type="password" autocomplete="current-password" placeholder="admin_passphrase" />
-          </label>
-          <div class="dialog-actions">
-            <button type="button" class="ghost" id="adminCancel">取消</button>
-            <button type="submit" class="primary">解锁</button>
           </div>
         </form>
       </dialog>
