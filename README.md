@@ -4,13 +4,14 @@
 
 仓库：https://github.com/sxd55/astrbot_plugin_tiancai
 
-## v1.7.0 要点
+## v1.7.1 要点
 
 - 新增管理台 **「公共库」** 栏（在视频库旁边）
-- 可用 `github_token` + `github_repo` 管理自己的公共库：浏览、刷新、编辑标题/标签、删除、下载到本地
+- 公共库卡片支持与视频库相同的**右侧预览**
+- 可用 `github_token` + `github_repo` 管理自己的公共库：浏览、刷新、编辑、删除、下载到本地、预览
 - 设置面板分组说明、抽取模式下拉、菜单 URL 留空用官方默认
 - 公共视频下载后默认自动导入本地库
-- 发布仍需手填自己的 `github_repo`（读取官方菜单不依赖它）
+- 发布仍需手填自己的 `github_repo`
 - 设置说明：[`docs/SETTINGS.md`](./docs/SETTINGS.md)
 - 建库教程：[`docs/SETUP_PUBLIC_REPO.md`](./docs/SETUP_PUBLIC_REPO.md)
 

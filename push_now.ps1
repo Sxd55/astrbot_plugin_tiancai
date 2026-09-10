@@ -3,7 +3,7 @@ Set-Location -LiteralPath $PSScriptRoot
 
 $RemoteUrl = "https://github.com/sxd55/astrbot_plugin_tiancai.git"
 $LogFile = Join-Path $PSScriptRoot "push_log.txt"
-$CommitMsg = "feat(v1.7.0): public library manage tab (list/edit/delete/import)"
+$CommitMsg = "feat(v1.7.1): public library card preview like local library"
 
 function Write-Log([string]$Message) {
     $line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message

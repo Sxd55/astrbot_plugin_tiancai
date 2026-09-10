@@ -673,25 +673,35 @@ function renderPublicCard(item) {
   const checked = state.publicSelected.has(item.id) ? "checked" : "";
   const tags = (item.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
   const num = item.seq ? `#${item.seq}` : String(item.id || "").slice(0, 10);
+  const previewHint =
+    item.can_preview === false ? "文件较大，点击尝试预览" : "点击播放预览";
   return `<article class="v-card" data-id="${esc(item.id)}">
-    <div class="v-main">
-      <div class="v-head">
-        <input type="checkbox" data-public-select="${esc(item.id)}" ${checked} />
-        <div>
-          <div class="v-title">${esc(num)}</div>
-          <div class="v-meta">
-            ${esc(item.size_human || "-")} · ${esc(item.created_at_human || "")}<br/>
-            ID：${esc(item.id)}
+    <div class="v-body">
+      <div class="v-main">
+        <div class="v-head">
+          <input type="checkbox" data-public-select="${esc(item.id)}" ${checked} />
+          <div>
+            <div class="v-title">${esc(num)}</div>
+            <div class="v-meta">
+              ${esc(item.size_human || "-")} · ${esc(item.created_at_human || "")}<br/>
+              ID：${esc(item.id)}
+            </div>
           </div>
         </div>
+        <div class="v-meta">${esc(item.title || "无标题")}</div>
+        <div class="tags">${tags || `<span class="tag">天菜</span>`}</div>
+        <div class="v-actions">
+          <button type="button" data-public-act="edit" data-id="${esc(item.id)}">编辑</button>
+          <button type="button" data-public-act="import" data-id="${esc(item.id)}">下载到本地</button>
+          <button type="button" class="danger" data-public-act="delete" data-id="${esc(item.id)}">删除</button>
+        </div>
       </div>
-      <div class="v-meta">${esc(item.title || "无标题")}</div>
-      <div class="tags">${tags || `<span class="tag">天菜</span>`}</div>
-      <div class="v-actions">
-        <button type="button" data-public-act="edit" data-id="${esc(item.id)}">编辑</button>
-        <button type="button" data-public-act="import" data-id="${esc(item.id)}">下载到本地</button>
-        <button type="button" class="danger" data-public-act="delete" data-id="${esc(item.id)}">删除</button>
-      </div>
+      <button type="button" class="preview-box" data-public-act="preview" data-id="${esc(item.id)}" title="${esc(previewHint)}">
+        <span class="preview-placeholder">
+          <span class="play-icon">▶</span>
+          <span>预览</span>
+        </span>
+      </button>
     </div>
   </article>`;
 }
@@ -712,6 +722,8 @@ function bindPublicCardEvents(box) {
       try {
         if (act === "edit") {
           openPublicEdit(id);
+        } else if (act === "preview") {
+          await openPublicPreview(id, btn);
         } else if (act === "import") {
           toast("正在下载到本地…");
           const result = await bridge.apiPost("public/managed/import", { ids: [id] });
@@ -734,6 +746,46 @@ function bindPublicCardEvents(box) {
       }
     });
   });
+}
+
+async function openPublicPreview(id, btn) {
+  if (btn.dataset.loaded === "1") {
+    const video = btn.querySelector("video");
+    if (video) {
+      if (video.paused) video.play().catch(() => {});
+      else video.pause();
+    }
+    return;
+  }
+  btn.classList.add("loading");
+  const ph = btn.querySelector(".preview-placeholder");
+  if (ph) ph.innerHTML = `<span>加载中…</span>`;
+  try {
+    const media = await bridge.apiGet("public/managed/media", { id });
+    if (!media?.data_url) throw new Error("无预览数据");
+    btn.innerHTML = "";
+    const video = document.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.src = media.data_url;
+    video.addEventListener("click", (e) => e.stopPropagation(), true);
+    btn.appendChild(video);
+    btn.dataset.loaded = "1";
+    btn.classList.add("has-video");
+    video.play().catch(() => {});
+  } catch (err) {
+    const msg = String(err.message || err);
+    if (msg.includes("too large") || msg.includes("413")) {
+      toast("文件较大，请用「下载到本地」后在视频库预览");
+      if (ph) ph.innerHTML = `<span class="play-icon">⬇</span><span>请下载</span>`;
+    } else {
+      toast(`预览失败：${msg}`);
+      if (ph) ph.innerHTML = `<span class="play-icon">▶</span><span>预览</span>`;
+    }
+  } finally {
+    btn.classList.remove("loading");
+  }
 }
 
 function openPublicEdit(id) {

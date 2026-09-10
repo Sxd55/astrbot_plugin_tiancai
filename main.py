@@ -118,7 +118,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.7.0",
+    "1.7.1",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -161,6 +161,7 @@ class TiancaiPlugin(Star):
             ("public/managed/update", self.api_public_managed_update, ["POST"], "编辑公共库条目"),
             ("public/managed/delete", self.api_public_managed_delete, ["POST"], "删除公共库条目"),
             ("public/managed/import", self.api_public_managed_import, ["POST"], "公共库下载到本地"),
+            ("public/managed/media", self.api_public_managed_media, ["GET"], "公共库预览媒体"),
             ("config/get", self.api_config_get, ["GET"], "读取插件配置"),
             ("config/save", self.api_config_save, ["POST"], "保存插件配置"),
         ]
@@ -698,6 +699,7 @@ class TiancaiPlugin(Star):
             "created_at_human": self._fmt_time(item.get("created_at")) or "",
             "source_local_id": item.get("source_local_id") or "",
             "source_local_seq": item.get("source_local_seq"),
+            "can_preview": bool(size) and size <= PREVIEW_MAX_BYTES,
         }
 
     async def api_public_managed_list(self):
@@ -1045,6 +1047,79 @@ class TiancaiPlugin(Star):
             "asset_errors": asset_errors,
             "repo": repo,
         }
+
+    async def api_public_managed_media(self):
+        """下载公共视频到缓存后返回 data URL，供公共库页预览。"""
+        req = self._require_managed_repo()
+        if not isinstance(req, tuple):
+            return req
+        token, repo = req
+        item_id = str(request.query.get("id", "") or "").strip()
+        if not item_id:
+            return error_response("id required", status_code=400)
+
+        branch = str(self.config.get("github_branch") or "main").strip() or "main"
+        index_path = (
+            str(self.config.get("github_index_path") or "public/public_index.json").strip()
+            or "public/public_index.json"
+        )
+        try:
+            remote = await asyncio.to_thread(
+                self._github_get_index_file, repo, branch, index_path, token
+            )
+        except Exception as exc:  # noqa: BLE001
+            return error_response(str(exc), status_code=500)
+
+        target = None
+        for v in remote.get("videos") or []:
+            if isinstance(v, dict) and str(v.get("id")) == item_id:
+                target = v
+                break
+        if target is None:
+            return error_response("not found", status_code=404)
+
+        url = str(target.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return error_response("invalid url", status_code=400)
+
+        size_hint = int(target.get("size") or 0)
+        if size_hint > PREVIEW_MAX_BYTES:
+            return error_response(
+                f"file too large for inline preview ({self._fmt_size(size_hint)}), use download",
+                status_code=413,
+            )
+
+        suffix = Path(urlparse(url).path).suffix.lower() or ".mp4"
+        if suffix not in VIDEO_SUFFIXES:
+            suffix = ".mp4"
+        cache_path = self.public_cache_dir / f"{item_id}{suffix}"
+        try:
+            if not (cache_path.is_file() and cache_path.stat().st_size > 0):
+                await asyncio.to_thread(self._http_download, url, cache_path)
+            if not cache_path.is_file():
+                return error_response("download failed", status_code=500)
+            size = cache_path.stat().st_size
+            if size > PREVIEW_MAX_BYTES:
+                return error_response(
+                    f"file too large for inline preview ({self._fmt_size(size)}), use download",
+                    status_code=413,
+                )
+            mime, _ = mimetypes.guess_type(str(cache_path))
+            mime = mime or "video/mp4"
+            data = await asyncio.to_thread(cache_path.read_bytes)
+            b64 = base64.b64encode(data).decode("ascii")
+            return json_response(
+                {
+                    "id": item_id,
+                    "seq": target.get("seq"),
+                    "mime": mime,
+                    "size": size,
+                    "data_url": f"data:{mime};base64,{b64}",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("公共库预览失败")
+            return error_response(str(exc), status_code=500)
 
     async def api_config_get(self):
         data = {}
