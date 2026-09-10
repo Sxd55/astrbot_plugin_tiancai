@@ -6,7 +6,7 @@
     "default": "videos"
   },
   "max_videos": {
-    "description": "视频库最大数量（不含回收站）",
+    "description": "本地视频库最大数量（不含回收站）",
     "type": "int",
     "hint": "超过上限时拒绝继续入库，设为 0 表示不限制",
     "default": 0
@@ -44,7 +44,44 @@
   "pinned_weight": {
     "description": "置顶天菜权重",
     "type": "float",
-    "hint": "pinned=true 的视频基础权重（后续置顶指令会用到）",
+    "hint": "pinned=true 的视频基础权重",
     "default": 3.0
+  },
+  "public_enabled": {
+    "description": "启用公共天菜源",
+    "type": "bool",
+    "hint": "开启后会定期同步 GitHub 等公开菜单；用户只能下载，不能上传到公共库",
+    "default": false
+  },
+  "public_index_url": {
+    "description": "公共菜单 URL",
+    "type": "string",
+    "hint": "例如 https://raw.githubusercontent.com/<user>/tiancai-public/main/public_index.json",
+    "default": ""
+  },
+  "library_mode": {
+    "description": "看看天菜抽取范围",
+    "type": "string",
+    "hint": "local=仅本地；public=仅公共；mixed=本地+公共混合",
+    "options": ["local", "public", "mixed"],
+    "default": "local"
+  },
+  "public_sync_hours": {
+    "description": "公共菜单同步间隔（小时）",
+    "type": "float",
+    "hint": "小于等于 0 表示每次看看天菜前都尝试同步（仍会有短冷却）",
+    "default": 12
+  },
+  "public_cache_enabled": {
+    "description": "缓存已下载的公共视频",
+    "type": "bool",
+    "hint": "开启后抽中公共视频会落到本地缓存，减少重复流量",
+    "default": true
+  },
+  "public_weight": {
+    "description": "mixed 模式下公共条目权重倍率",
+    "type": "float",
+    "hint": "1.0 表示与本地同等；小于 1 更常抽本地，大于 1 更常抽公共",
+    "default": 1.0
   }
 }

@@ -3,10 +3,10 @@ display_name: 天菜视频库
 short_desc: 收藏群视频，随机「看看天菜」
 desc: |
   回复 QQ 群视频消息并发送「收进天菜」即可下载保存到本地全局视频库；
-  发送「看看天菜」会按降权策略随机抽取一条本地视频发到当前会话。
-  支持白名单入库、冷却、软删除、顺序编号、默认标签「天菜」，
-  以及 WebUI「天菜管理台」浏览/预览/上传/回收站。
-version: v1.3.0
+  发送「看看天菜」可从本地库和/或公共天菜源抽取。
+  支持白名单入库、冷却、软删除、顺序编号、默认标签「天菜」、
+  WebUI 管理台，以及 GitHub 菜单 + 对象存储直链的只读公共源。
+version: v1.4.0
 author: sxd55
 repo: https://github.com/sxd55/astrbot_plugin_tiancai
 astrbot_version: ">=4.9.2"

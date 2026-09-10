@@ -292,7 +292,8 @@ AstrBot 支持在插件目录放 `pages/<page_name>/index.html`，通过 `window
 | --- | --- | --- |
 | **Batch 1** | 索引升级 v2 + 权限/冷却配置 + `删除天菜`/`天菜详情`/`天菜帮助` + 降权随机 | ✅ 已完成并推送 v1.1.0 |
 | **Batch 2** | Plugin Page 管理台 + stats/list/delete/restore/purge/update/upload/download/logs API | ✅ 已完成 v1.2.0 |
-| **Batch 3** | 顺序编号 #1… / 默认标签「天菜」 / 卡片内视频预览 | ✅ 代码完成 v1.3.0（待你 push） |
+| **Batch 3** | 顺序编号 #1… / 默认标签「天菜」 / 卡片内视频预览 | ✅ 代码完成 v1.3.0 |
+| **Batch 4** | 公共天菜源（GitHub index + URL，只读同步/缓存/mixed）+ 运营文档 | ✅ 代码完成 v1.4.0（待你 push） |
 | **Batch 3** | 标签备注编辑、搜索筛选、设置页、审计日志 | 管理台闭环 |
 | **Batch 4** | 今日天菜 / 标签抽 / 搜索 / 置顶 / 连抽 / 排行 / 我的天菜 | 指令全家桶 |
 | **Batch 5** | hash 去重、容量治理、定时推送 | 运营能力就绪 |

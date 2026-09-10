@@ -3,10 +3,12 @@
 Batch 1：索引 v2、权限白名单、冷却、软删除指令、降权随机
 Batch 2：WebUI 管理台（总览 / 列表 / 回收站 / 上传下载）
 Batch 3：顺序编号、默认标签「天菜」、卡片内视频预览
+Batch 4：公共天菜源（GitHub index + URL 视频，只读同步/缓存/混合抽取）
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import mimetypes
@@ -17,6 +19,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -34,6 +38,8 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 PLUGIN_NAME = "astrbot_plugin_tiancai"
 INDEX_FILENAME = "index.json"
 LOG_FILENAME = "audit.log"
+PUBLIC_INDEX_CACHE = "public_index.cache.json"
+PUBLIC_META_FILE = "public_sync_meta.json"
 INDEX_VERSION = 3
 DEFAULT_TAGS = ["天菜"]
 # 预览走 base64，过大则提示改用下载（避免拖垮 Dashboard）
@@ -41,6 +47,7 @@ PREVIEW_MAX_BYTES = 48 * 1024 * 1024
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv"}
 SAFE_ID_RE = re.compile(r"^[a-fA-F0-9]{8,64}$")
 SAFE_CODE_RE = re.compile(r"^[0-9a-fA-F]{1,64}$")
+PUBLIC_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,128}$")
 
 
 def _now() -> int:
@@ -68,7 +75,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.3.0",
+    "1.4.0",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -78,11 +85,16 @@ class TiancaiPlugin(Star):
         self.videos_dir = self.data_dir / str(
             self.config.get("storage_subdir", "videos") or "videos"
         )
+        self.public_cache_dir = self.data_dir / "public_cache"
         self.index_path = self.data_dir / INDEX_FILENAME
         self.log_path = self.data_dir / LOG_FILENAME
+        self.public_index_path = self.data_dir / PUBLIC_INDEX_CACHE
+        self.public_meta_path = self.data_dir / PUBLIC_META_FILE
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.videos_dir.mkdir(parents=True, exist_ok=True)
+        self.public_cache_dir.mkdir(parents=True, exist_ok=True)
         self._cooldowns: dict[str, float] = {}
+        self._public_sync_lock = asyncio.Lock()
         self._ensure_index()
         self._register_web_apis()
 
@@ -98,6 +110,8 @@ class TiancaiPlugin(Star):
             ("videos/download", self.api_download_video, ["GET"], "下载视频文件"),
             ("videos/media", self.api_media_video, ["GET"], "预览用媒体数据"),
             ("logs", self.api_logs, ["GET"], "审计日志"),
+            ("public/status", self.api_public_status, ["GET"], "公共源状态"),
+            ("public/sync", self.api_public_sync, ["POST"], "手动同步公共菜单"),
         ]
         for path, handler, methods, desc in apis:
             self.context.register_web_api(
@@ -117,6 +131,12 @@ class TiancaiPlugin(Star):
             len(active),
             len(index.get("videos", [])) - len(active),
         )
+        if self._public_enabled():
+            try:
+                result = await self._sync_public_index(force=False)
+                logger.info("公共天菜源同步：%s", result.get("message"))
+            except Exception:  # noqa: BLE001
+                logger.exception("启动时同步公共天菜源失败")
 
     # ------------------------------------------------------------------
     # Web API（管理台）
@@ -173,6 +193,7 @@ class TiancaiPlugin(Star):
                 "max_videos": int(self.config.get("max_videos", 0) or 0),
                 "recent_collected": [self._public_item(v) for v in recent],
                 "recent_played": [self._public_item(v) for v in recent_play],
+                "public": self._public_status_dict(),
             }
         )
 
@@ -545,6 +566,19 @@ class TiancaiPlugin(Star):
             )
         return json_response({"items": items})
 
+    async def api_public_status(self):
+        return json_response(self._public_status_dict())
+
+    async def api_public_sync(self):
+        if not self._public_enabled():
+            return error_response("public source disabled", status_code=400)
+        try:
+            result = await self._sync_public_index(force=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("手动同步公共源失败")
+            return error_response(str(exc), status_code=500)
+        return json_response(result)
+
     def _normalize_ids(self, raw: Any) -> set[str]:
         """支持完整 uuid，或顺序编号（会解析成对应 uuid）。"""
         ids: set[str] = set()
@@ -703,35 +737,96 @@ class TiancaiPlugin(Star):
 
     @filter.command("看看天菜", alias={"来点天菜", "天菜"})
     async def show_tiancai(self, event: AstrMessageEvent):
-        """从全局天菜库随机发送一条视频（降权少重复）。"""
+        """从本地/公共天菜库随机发送一条视频（降权少重复）。"""
         cooled = self._check_cooldown(event)
         if cooled is not None:
             yield event.plain_result(cooled)
             return
 
+        mode = self._library_mode()
+        if self._public_enabled() and mode in {"public", "mixed"}:
+            try:
+                await self._sync_public_index(force=False)
+            except Exception:  # noqa: BLE001
+                logger.exception("看看天菜前同步公共源失败")
+
         index = self._load_index()
-        videos = self._existing_active_videos(index)
-        if not videos:
-            yield event.plain_result(
-                "天菜库还是空的。回复一条群视频并发送「收进天菜」先囤一点吧。"
-            )
+        local_videos = self._existing_active_videos(index)
+        public_videos = self._load_public_videos() if self._public_enabled() else []
+
+        pool: list[tuple[str, dict[str, Any]]] = []
+        if mode in {"local", "mixed"}:
+            pool.extend(("local", v) for v in local_videos)
+        if mode in {"public", "mixed"}:
+            pool.extend(("public", v) for v in public_videos)
+
+        if not pool:
+            if mode == "public":
+                yield event.plain_result(
+                    "公共天菜库还是空的。请检查 public_index_url，或先同步公共菜单。"
+                )
+            elif mode == "mixed":
+                yield event.plain_result(
+                    "本地和公共库都还是空的。可先「收进天菜」，或配置公共源。"
+                )
+            else:
+                yield event.plain_result(
+                    "天菜库还是空的。回复一条群视频并发送「收进天菜」先囤一点吧。"
+                )
             return
 
-        chosen = self._weighted_choice(index, videos)
-        path = self.videos_dir / str(chosen["filename"])
-        video = Video.fromFileSystem(path=str(path))
+        source, chosen = self._weighted_choice_pool(index, pool)
+        try:
+            if source == "local":
+                path = self.videos_dir / str(chosen["filename"])
+                video = Video.fromFileSystem(path=str(path))
+                chosen["play_count"] = int(chosen.get("play_count") or 0) + 1
+                chosen["last_played_at"] = _now()
+                recent = index.setdefault("recent_sent_ids", [])
+                recent.insert(0, chosen["id"])
+                keep_n = max(
+                    int(self.config.get("recent_penalty_count", 8) or 8) * 2, 16
+                )
+                index["recent_sent_ids"] = recent[:keep_n]
+                self._save_index(index)
+                self._mark_cooldown(event)
+                self._audit("play", event, video_id=str(chosen["id"]))
+                yield event.chain_result([video])
+                return
 
-        chosen["play_count"] = int(chosen.get("play_count") or 0) + 1
-        chosen["last_played_at"] = _now()
-        recent = index.setdefault("recent_sent_ids", [])
-        recent.insert(0, chosen["id"])
-        keep_n = max(int(self.config.get("recent_penalty_count", 8) or 8) * 2, 16)
-        index["recent_sent_ids"] = recent[:keep_n]
-        self._save_index(index)
-        self._mark_cooldown(event)
-        self._audit("play", event, video_id=str(chosen["id"]))
+            # public
+            video_comp = await self._resolve_public_video(chosen)
+            recent = index.setdefault("recent_sent_ids", [])
+            recent.insert(0, f"public:{chosen.get('id')}")
+            keep_n = max(int(self.config.get("recent_penalty_count", 8) or 8) * 2, 16)
+            index["recent_sent_ids"] = recent[:keep_n]
+            self._save_index(index)
+            self._mark_cooldown(event)
+            self._audit(
+                "play_public",
+                event,
+                video_id=str(chosen.get("id") or ""),
+                detail=f"seq={chosen.get('seq')}",
+            )
+            yield event.chain_result([video_comp])
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("发送天菜失败")
+            yield event.plain_result(f"发送失败：{exc}")
 
-        yield event.chain_result([video])
+    @filter.command("同步天菜源", alias={"天菜同步", "同步公共天菜"})
+    async def sync_public_cmd(self, event: AstrMessageEvent):
+        """手动同步公共天菜菜单。"""
+        if not self._public_enabled():
+            yield event.plain_result(
+                "公共源未启用。请在插件配置打开 public_enabled 并填写 public_index_url。"
+            )
+            return
+        try:
+            result = await self._sync_public_index(force=True)
+            yield event.plain_result(result.get("message") or "同步完成")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("指令同步公共源失败")
+            yield event.plain_result(f"同步失败：{exc}")
 
     @filter.command("天菜数量", alias={"天菜库", "天菜列表"})
     async def tiancai_count(self, event: AstrMessageEvent):
@@ -743,9 +838,14 @@ class TiancaiPlugin(Star):
             for item in index.get("videos", [])
             if item.get("deleted_at") is not None
         ]
+        pub_n = len(self._load_public_videos()) if self._public_enabled() else 0
+        mode = self._library_mode()
+        extra = ""
+        if self._public_enabled():
+            extra = f"\n公共源：{pub_n} 条（模式 {mode}）"
         yield event.plain_result(
-            f"天菜库在库 {len(active)} 条，回收站 {len(deleted)} 条。\n"
-            f"目录：{self.videos_dir}"
+            f"天菜库在库 {len(active)} 条，回收站 {len(deleted)} 条。"
+            f"{extra}\n目录：{self.videos_dir}"
         )
 
     @filter.command("删除天菜", alias={"天菜删除"})
@@ -837,14 +937,16 @@ class TiancaiPlugin(Star):
         yield event.plain_result(
             "天菜视频库指令\n"
             "· 收进天菜：回复视频后入库（管理员/白名单），默认标签「天菜」\n"
-            "· 看看天菜：随机发一条（带冷却，少重复）\n"
-            "· 天菜数量：查看在库/回收站数量\n"
+            "· 看看天菜：随机发一条（本地/公共/混合，见配置 library_mode）\n"
+            "· 同步天菜源：手动拉取公共菜单（需启用公共源）\n"
+            "· 天菜数量：查看本地与公共数量\n"
             "· 删除天菜 <编号>：移入回收站，如 删除天菜 3\n"
             "· 天菜详情 <编号>：查看元信息\n"
             "· 清空天菜：管理员将全部在库移入回收站\n"
             "· 天菜帮助：查看本说明\n"
             "\n"
-            "编号从 1 起递增。WebUI：插件详情 → 天菜管理台（预览/上传/回收站）"
+            "公共库：维护者上传到 R2 + GitHub 菜单；用户只读。\n"
+            "详见 docs/PUBLIC_LIBRARY.md"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -919,6 +1021,230 @@ class TiancaiPlugin(Star):
             weights.append(max(weight, 0.0001))
 
         return random.choices(videos, weights=weights, k=1)[0]
+
+    def _weighted_choice_pool(
+        self,
+        index: dict[str, Any],
+        pool: list[tuple[str, dict[str, Any]]],
+    ) -> tuple[str, dict[str, Any]]:
+        recent_ids = [
+            str(x) for x in (index.get("recent_sent_ids") or []) if x is not None
+        ]
+        penalty_n = max(int(self.config.get("recent_penalty_count", 8) or 8), 0)
+        recent_set = set(recent_ids[:penalty_n])
+        recent_weight = float(self.config.get("recent_penalty_weight", 0.15) or 0.15)
+        pinned_weight = float(self.config.get("pinned_weight", 3.0) or 3.0)
+        public_weight = float(self.config.get("public_weight", 1.0) or 1.0)
+        if recent_weight < 0:
+            recent_weight = 0.0
+        if public_weight <= 0:
+            public_weight = 0.0001
+
+        weights: list[float] = []
+        for source, item in pool:
+            weight = pinned_weight if item.get("pinned") else 1.0
+            if source == "public":
+                weight *= public_weight
+                rid = f"public:{item.get('id')}"
+            else:
+                rid = str(item.get("id"))
+            if rid in recent_set:
+                weight *= recent_weight
+            weights.append(max(weight, 0.0001))
+
+        return random.choices(pool, weights=weights, k=1)[0]
+
+    # ------------------------------------------------------------------
+    # 公共天菜源
+    # ------------------------------------------------------------------
+
+    def _public_enabled(self) -> bool:
+        if not bool(self.config.get("public_enabled", False)):
+            return False
+        url = str(self.config.get("public_index_url") or "").strip()
+        return url.startswith("http://") or url.startswith("https://")
+
+    def _library_mode(self) -> str:
+        mode = str(self.config.get("library_mode") or "local").strip().lower()
+        if mode not in {"local", "public", "mixed"}:
+            return "local"
+        if mode in {"public", "mixed"} and not self._public_enabled():
+            return "local"
+        return mode
+
+    def _public_status_dict(self) -> dict[str, Any]:
+        meta = self._load_public_meta()
+        videos = self._load_public_videos() if self.public_index_path.exists() else []
+        return {
+            "enabled": self._public_enabled(),
+            "mode": self._library_mode(),
+            "index_url": str(self.config.get("public_index_url") or ""),
+            "cache_enabled": bool(self.config.get("public_cache_enabled", True)),
+            "sync_hours": float(self.config.get("public_sync_hours", 12) or 12),
+            "public_count": len(videos),
+            "last_sync_at": meta.get("last_sync_at"),
+            "last_sync_at_human": self._fmt_time(meta.get("last_sync_at")) or "",
+            "last_error": meta.get("last_error") or "",
+            "name": meta.get("name") or "",
+        }
+
+    def _load_public_meta(self) -> dict[str, Any]:
+        if not self.public_meta_path.exists():
+            return {}
+        try:
+            data = json.loads(self.public_meta_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _save_public_meta(self, data: dict[str, Any]) -> None:
+        self.public_meta_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _load_public_videos(self) -> list[dict[str, Any]]:
+        if not self.public_index_path.exists():
+            return []
+        try:
+            data = json.loads(self.public_index_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            logger.exception("读取公共菜单缓存失败")
+            return []
+        videos = data.get("videos", []) if isinstance(data, dict) else []
+        out: list[dict[str, Any]] = []
+        if not isinstance(videos, list):
+            return out
+        for raw in videos:
+            if not isinstance(raw, dict):
+                continue
+            url = str(raw.get("url") or "").strip()
+            vid = str(raw.get("id") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                continue
+            if not vid or not PUBLIC_ID_RE.match(vid):
+                continue
+            item = dict(raw)
+            item["id"] = vid
+            item["url"] = url
+            item["source"] = "public"
+            tags = item.get("tags")
+            if not isinstance(tags, list) or not tags:
+                item["tags"] = list(DEFAULT_TAGS)
+            try:
+                item["seq"] = int(item.get("seq") or 0)
+            except (TypeError, ValueError):
+                item["seq"] = 0
+            out.append(item)
+        return out
+
+    async def _sync_public_index(self, *, force: bool = False) -> dict[str, Any]:
+        if not self._public_enabled():
+            return {"ok": False, "message": "公共源未启用"}
+
+        async with self._public_sync_lock:
+            meta = self._load_public_meta()
+            sync_hours = float(self.config.get("public_sync_hours", 12) or 12)
+            last = int(meta.get("last_sync_at") or 0)
+            now = _now()
+            if (
+                not force
+                and sync_hours > 0
+                and last
+                and now - last < sync_hours * 3600
+                and self.public_index_path.exists()
+            ):
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "message": (
+                        f"距上次同步不足 {sync_hours} 小时，已跳过。"
+                        f"公共条目 {len(self._load_public_videos())} 条。"
+                    ),
+                }
+
+            url = str(self.config.get("public_index_url") or "").strip()
+            try:
+                text = await asyncio.to_thread(self._http_get_text, url)
+                data = json.loads(text)
+                if not isinstance(data, dict) or not isinstance(
+                    data.get("videos"), list
+                ):
+                    raise ValueError("菜单格式无效：需要包含 videos 数组的 JSON 对象")
+                self.public_index_path.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                count = len(self._load_public_videos())
+                meta.update(
+                    {
+                        "last_sync_at": now,
+                        "last_error": "",
+                        "name": str(data.get("name") or ""),
+                        "source_url": url,
+                        "count": count,
+                    }
+                )
+                self._save_public_meta(meta)
+                self._audit("public_sync", detail=f"count={count}")
+                return {
+                    "ok": True,
+                    "skipped": False,
+                    "count": count,
+                    "message": f"公共菜单同步成功，共 {count} 条。",
+                }
+            except Exception as exc:  # noqa: BLE001
+                meta["last_error"] = str(exc)
+                meta["last_sync_attempt_at"] = now
+                self._save_public_meta(meta)
+                raise
+
+    @staticmethod
+    def _http_get_text(url: str, timeout: int = 30) -> str:
+        req = Request(
+            url,
+            headers={"User-Agent": "astrbot_plugin_tiancai/1.4"},
+            method="GET",
+        )
+        with urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            charset = resp.headers.get_content_charset() or "utf-8"
+            return resp.read().decode(charset, errors="replace")
+
+    @staticmethod
+    def _http_download(url: str, dest: Path, timeout: int = 120) -> None:
+        req = Request(
+            url,
+            headers={"User-Agent": "astrbot_plugin_tiancai/1.4"},
+            method="GET",
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        with urlopen(req, timeout=timeout) as resp, tmp.open("wb") as fp:  # noqa: S310
+            shutil.copyfileobj(resp, fp)
+        tmp.replace(dest)
+
+    async def _resolve_public_video(self, item: dict[str, Any]) -> Video:
+        url = str(item.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("公共条目缺少有效 url")
+
+        cache_on = bool(self.config.get("public_cache_enabled", True))
+        vid = str(item.get("id") or "unknown")
+        suffix = Path(urlparse(url).path).suffix.lower()
+        if suffix not in VIDEO_SUFFIXES:
+            suffix = ".mp4"
+        cache_path = self.public_cache_dir / f"{vid}{suffix}"
+
+        if cache_on and cache_path.is_file() and cache_path.stat().st_size > 0:
+            return Video.fromFileSystem(path=str(cache_path))
+
+        if cache_on:
+            await asyncio.to_thread(self._http_download, url, cache_path)
+            if cache_path.is_file() and cache_path.stat().st_size > 0:
+                return Video.fromFileSystem(path=str(cache_path))
+
+        # 无缓存或下载失败时，尝试直接 URL 发送
+        return Video.fromURL(url=url)
 
     # ------------------------------------------------------------------
     # 视频提取

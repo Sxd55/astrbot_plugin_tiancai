@@ -7,25 +7,22 @@ AstrBot 插件：把 QQ 群里的视频「收进天菜」存到本地全局库�
 > 基于 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 插件体系开发。  
 > 开发文档：[AstrBot 插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)
 
-## 功能（v1.3.0）
+## 功能（v1.4.0）
 
-### Batch 1
-- **收进天菜**：回复群视频后入库（管理员或白名单）
-- **看看天菜**：降权少重复随机发送 + 冷却防刷
-- **天菜数量 / 删除天菜 / 天菜详情 / 天菜帮助 / 清空天菜**
-- 索引自动升级（备注/标签/置顶/播放统计/软删除）
+### Batch 1～3
+- 本地入库 / 降权随机 / 冷却 / 软删除 / 顺序编号 / 默认标签「天菜」
+- WebUI 天菜管理台（总览、列表、预览、上传、回收站、日志）
 
-### Batch 2 · WebUI 管理台
-- 插件详情页 → **天菜管理台**
-- 总览 / 视频库 / 回收站 / 上传 / 审计日志
+### Batch 4 · 公共天菜源（只读）
+- **GitHub 公开菜单 + R2/CDN 视频直链**
+- 配置 `public_enabled` + `public_index_url`
+- `library_mode`：`local` / `public` / `mixed`
+- 本地缓存公共视频，减少重复流量
+- 指令：`同步天菜源`
+- **用户不能上传到公共库**；上传与审核见 `docs/PUBLIC_LIBRARY.md`
+- 示例菜单：`examples/tiancai-public/`
 
-### Batch 3
-- **顺序编号**：从 `#1` 起递增（旧数据自动迁移分配）
-- **默认标签**：入库自动带「天菜」
-- **卡片预览**：视频库右侧预览区，点击加载并播放
-- 指令支持 `删除天菜 3` / `天菜详情 3` 这种数字编号
-
-后续批次：标签抽/搜索/连抽/排行指令、hash 去重、定时推送等。详见 `FEATURE_DISCUSSION.md`。
+后续：标签抽/搜索/连抽/排行、hash 去重、定时推送等。详见 `FEATURE_DISCUSSION.md`。
 
 ## 指令
 
@@ -33,7 +30,8 @@ AstrBot 插件：把 QQ 群里的视频「收进天菜」存到本地全局库�
 | --- | --- | --- | --- |
 | `收进天菜` | `加入天菜` / `天菜入库` | 管理员或白名单 | 回复视频消息后入库 |
 | `看看天菜` | `来点天菜` / `天菜` | 全员（有冷却） | 随机发送一条本地视频 |
-| `天菜数量` | `天菜库` / `天菜列表` | 全员 | 查看数量 |
+| `同步天菜源` | `天菜同步` / `同步公共天菜` | 全员 | 手动拉取公共菜单 |
+| `天菜数量` | `天菜库` / `天菜列表` | 全员 | 查看本地/公共数量 |
 | `删除天菜 <编号>` | `天菜删除` | 管理员或原收藏人 | 移入回收站，如 `删除天菜 3` |
 | `天菜详情 <编号>` | `天菜信息` | 全员 | 查看元信息，如 `天菜详情 3` |
 | `天菜帮助` | `天菜说明` / `天菜指令` | 全员 | 查看帮助 |
@@ -76,8 +74,23 @@ data/plugin_data/astrbot_plugin_tiancai/audit.log
 | `recent_penalty_count` | `8` | 近期已发条数，用于降权 |
 | `recent_penalty_weight` | `0.15` | 近期视频权重（普通为 1.0） |
 | `pinned_weight` | `3.0` | 置顶视频权重 |
+| `public_enabled` | `false` | 是否启用公共天菜源 |
+| `public_index_url` | `""` | 公共菜单 JSON 的 HTTPS 地址 |
+| `library_mode` | `local` | `local` / `public` / `mixed` |
+| `public_sync_hours` | `12` | 公共菜单同步间隔（小时） |
+| `public_cache_enabled` | `true` | 是否缓存已下载的公共视频 |
+| `public_weight` | `1.0` | mixed 时公共条目权重倍率 |
 
-## 平台说明
+## 公共库（谁上传 / 谁审核）
+
+简要结论：
+
+- **上传云盘（R2）**：只有公共库维护者  
+- **审核**：维护者或指定审核人  
+- **装插件的用户**：只能同步菜单、下载/抽取，**不能**往公共盘传  
+
+完整流程：[docs/PUBLIC_LIBRARY.md](./docs/PUBLIC_LIBRARY.md)  
+示例仓库模板：[examples/tiancai-public/](./examples/tiancai-public/)
 
 - 推荐配合 **aiocqhttp / OneBot v11**（NapCat、Lagrange 等）
 - 「收进天菜」依赖协议端提供被引用消息中的视频文件或可下载 URL
