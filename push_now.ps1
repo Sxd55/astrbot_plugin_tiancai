@@ -15,18 +15,30 @@ function Fail([string]$Message) {
     Write-Log "FAILED: $Message"
     Write-Host $Message
     Write-Host ""
-    Write-Host "If rebase conflict happened, open the conflicting files, fix them, then:"
-    Write-Host "  git add ."
-    Write-Host "  git rebase --continue"
+    Write-Host "This is often a GitHub network reset in China."
+    Write-Host "Try again later, or enable VPN/proxy, then rerun push_now.bat"
+    Write-Host ""
+    Write-Host "Manual commands:"
+    Write-Host "  git pull --rebase origin main"
     Write-Host "  git push -u origin main"
     Read-Host "Press Enter to exit"
     exit 1
 }
 
-Add-Content -LiteralPath $LogFile -Value "" -Encoding UTF8
-Write-Log "Push Batch6 start (with pull --rebase)"
+function Invoke-GitRetry([string]$Label, [scriptblock]$Action, [int]$Tries = 5) {
+    for ($i = 1; $i -le $Tries; $i++) {
+        Write-Host "=== $Label attempt $i/$Tries ==="
+        & $Action
+        if ($LASTEXITCODE -eq 0) { return $true }
+        Write-Log "$Label attempt $i failed, wait $($i * 2)s..."
+        Start-Sleep -Seconds ($i * 2)
+    }
+    return $false
+}
 
-# ensure logo
+Add-Content -LiteralPath $LogFile -Value "" -Encoding UTF8
+Write-Log "Push start (retry pull/push)"
+
 $logoSrc = "C:\Users\24122\AppData\Local\Claude-3p\local-agent-mode-sessions\a1678ef5\00000000\a865ea4d\uploads\0ee926631c1b369d3bc3a340898b9012.png"
 $logoDst = Join-Path $PSScriptRoot "logo.png"
 if (-not (Test-Path $logoDst) -and (Test-Path $logoSrc)) {
@@ -57,12 +69,8 @@ if ($status) {
     Write-Log "committing local changes"
     Write-Host $status
     git commit -m $CommitMsg
-    if ($LASTEXITCODE -ne 0) {
-        # maybe nothing staged after all
-        Write-Log "commit returned $LASTEXITCODE (may be ok if empty)"
-    }
 } else {
-    Write-Log "nothing new to commit"
+    Write-Log "nothing new to commit (local commit may already exist)"
 }
 
 git branch -M main
@@ -77,24 +85,24 @@ if ($remoteNames -contains "origin") {
     git remote add origin $RemoteUrl
 }
 
-Write-Log "git pull --rebase origin main"
-git pull --rebase origin main
-if ($LASTEXITCODE -ne 0) {
-    Fail "git pull --rebase failed. Resolve conflicts then continue rebase."
+# If a previous rebase is in progress, abort only when stuck; otherwise continue carefully
+if (Test-Path ".git/rebase-merge") {
+    Write-Log "detected in-progress rebase; trying git rebase --abort then retry pull"
+    git rebase --abort 2>$null
 }
 
-Write-Log "git push (up to 3 tries)"
-$ok = $false
-for ($i = 1; $i -le 3; $i++) {
-    Write-Host "=== push attempt $i/3 ==="
-    git push -u origin main
-    if ($LASTEXITCODE -eq 0) { $ok = $true; break }
-    Start-Sleep -Seconds 3
+$pullOk = Invoke-GitRetry "git pull --rebase" { git pull --rebase origin main }
+if (-not $pullOk) {
+    Fail "git pull --rebase failed after retries (network). Local commits are kept."
 }
-if (-not $ok) { Fail "git push failed after 3 tries" }
+
+$pushOk = Invoke-GitRetry "git push" { git push -u origin main }
+if (-not $pushOk) {
+    Fail "git push failed after retries (network). Local commits are kept."
+}
 
 Write-Log "SUCCESS"
 Write-Host "Done: $RemoteUrl"
-Write-Host "Version: v1.6.0 Batch6"
+Write-Host "Version: v1.6.1"
 Read-Host "Press Enter to exit"
 exit 0
