@@ -334,6 +334,100 @@ button.danger {
   opacity: 0.75;
 }
 
+.v-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.v-main {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.preview-box {
+  position: relative;
+  width: 132px;
+  min-height: 132px;
+  border-radius: 14px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+  background:
+    linear-gradient(160deg, color-mix(in srgb, var(--accent) 10%, var(--bg)), var(--bg));
+  color: var(--muted);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.preview-box:hover:not(:disabled) {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+  transform: none;
+}
+
+.preview-box:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.preview-box.loading {
+  opacity: 0.8;
+}
+
+.preview-box.has-video {
+  border-style: solid;
+  padding: 0;
+  background: #000;
+}
+
+.preview-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.play-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 0.85rem;
+  padding-left: 2px;
+}
+
+.preview-box video {
+  width: 100%;
+  height: 100%;
+  min-height: 132px;
+  object-fit: cover;
+  background: #000;
+  display: block;
+}
+
+@media (max-width: 520px) {
+  .v-body {
+    grid-template-columns: 1fr;
+  }
+
+  .preview-box {
+    width: 100%;
+    min-height: 160px;
+  }
+}
+
 .v-head {
   display: flex;
   align-items: flex-start;

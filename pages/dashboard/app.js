@@ -8,6 +8,7 @@ const state = {
   scope: "active",
   selected: new Set(),
   stats: null,
+  itemsById: new Map(),
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -100,8 +101,9 @@ function renderMini(sel, items, timeKey) {
   box.innerHTML = items
     .map((item) => {
       const t = item[timeKey] || item.saved_at_human || "—";
+      const label = item.seq ? `#${item.seq}` : item.id_short || String(item.id || "").slice(0, 8);
       return `<div class="mini-item">
-        <span class="id">${esc(item.id_short || String(item.id || "").slice(0, 8))}</span>
+        <span class="id">${esc(label)}</span>
         <span>${esc(t)}</span>
       </div>`;
     })
@@ -114,22 +116,26 @@ async function loadLibrary() {
   box.innerHTML = `<div class="empty">加载中…</div>`;
 
   const q = $("#searchQ")?.value?.trim() || "";
-  const sort = $("#sortBy")?.value || "saved_at";
+  const sort = $("#sortBy")?.value || "seq";
 
   try {
     const data = await bridge.apiGet("videos", {
       scope: state.scope,
       q,
       sort,
-      order: "desc",
+      order: sort === "seq" ? "asc" : "desc",
       page: state.page,
       page_size: state.pageSize,
     });
     state.total = data.total || 0;
     const items = data.items || [];
+    state.itemsById = new Map(items.map((it) => [it.id, it]));
     if (!items.length) {
       box.classList.add("empty");
-      box.textContent = state.scope === "trash" ? "回收站为空" : "视频库为空，可上传或在群里「收进天菜」";
+      box.textContent =
+        state.scope === "trash"
+          ? "回收站为空"
+          : "视频库为空，可上传或在群里「收进天菜」";
       updatePager();
       updateBatchButtons();
       return;
@@ -153,6 +159,7 @@ function renderCard(item) {
   const pin = item.pinned ? `<span class="pin">置顶</span>` : "";
   const missing = item.file_exists ? "" : "missing";
   const note = item.note || "无备注";
+  const num = item.seq ? `#${item.seq}` : item.id_short || String(item.id).slice(0, 8);
 
   const actions =
     state.scope === "trash"
@@ -167,22 +174,39 @@ function renderCard(item) {
         <button type="button" class="danger" data-act="delete" data-id="${esc(item.id)}">回收站</button>
       `;
 
+  const previewDisabled = item.file_exists ? "" : "disabled";
+  const previewHint = item.file_exists
+    ? item.can_preview === false
+      ? "文件较大，点击尝试预览"
+      : "点击播放预览"
+    : "文件缺失";
+
   return `<article class="v-card ${missing}" data-id="${esc(item.id)}">
-    <div class="v-head">
-      <input type="checkbox" data-select="${esc(item.id)}" ${checked} />
-      <div>
-        <div class="v-title">${esc(item.id_short || String(item.id).slice(0, 8))} ${pin}</div>
-        <div class="v-meta">
-          ${esc(item.size_human)} · 抽中 ${esc(item.play_count)} 次<br/>
-          入库 ${esc(item.saved_at_human || "—")}<br/>
-          ${item.collector_name ? `收藏人 ${esc(item.collector_name)}` : "Web/未知来源"}
-          ${item.file_exists ? "" : " · 文件缺失"}
+    <div class="v-body">
+      <div class="v-main">
+        <div class="v-head">
+          <input type="checkbox" data-select="${esc(item.id)}" ${checked} />
+          <div>
+            <div class="v-title">${esc(num)} ${pin}</div>
+            <div class="v-meta">
+              ${esc(item.size_human)} · 抽中 ${esc(item.play_count)} 次<br/>
+              入库 ${esc(item.saved_at_human || "—")}<br/>
+              ${item.collector_name ? `收藏人 ${esc(item.collector_name)}` : "Web/未知来源"}
+              ${item.file_exists ? "" : " · 文件缺失"}
+            </div>
+          </div>
         </div>
+        <div class="v-meta">${esc(note)}</div>
+        <div class="tags">${tags || `<span class="tag">天菜</span>`}</div>
+        <div class="v-actions">${actions}</div>
       </div>
+      <button type="button" class="preview-box" data-act="preview" data-id="${esc(item.id)}" ${previewDisabled} title="${esc(previewHint)}">
+        <span class="preview-placeholder">
+          <span class="play-icon">▶</span>
+          <span>预览</span>
+        </span>
+      </button>
     </div>
-    <div class="v-meta">${esc(note)}</div>
-    <div class="tags">${tags || `<span class="tag">无标签</span>`}</div>
-    <div class="v-actions">${actions}</div>
   </article>`;
 }
 
@@ -215,17 +239,76 @@ function bindCardEvents(box) {
           toast("已永久删除");
           await refreshCurrent();
         } else if (act === "download") {
-          const name = btn.getAttribute("data-name") || `tiancai_${id.slice(0, 8)}.mp4`;
+          const name =
+            btn.getAttribute("data-name") || `tiancai_${id.slice(0, 8)}.mp4`;
           await bridge.download("videos/download", { id }, name);
           toast("开始下载");
         } else if (act === "edit") {
           openEdit(id);
+        } else if (act === "preview") {
+          await openPreview(id, btn);
         }
       } catch (err) {
         toast(`操作失败：${err.message || err}`);
       }
     });
   });
+}
+
+async function openPreview(id, btn) {
+  const item = state.itemsById.get(id);
+  if (!item?.file_exists) {
+    toast("文件不存在，无法预览");
+    return;
+  }
+
+  // 已加载过则直接播放
+  if (btn.dataset.loaded === "1") {
+    const video = btn.querySelector("video");
+    if (video) {
+      if (video.paused) video.play().catch(() => {});
+      else video.pause();
+    }
+    return;
+  }
+
+  btn.classList.add("loading");
+  const ph = btn.querySelector(".preview-placeholder");
+  if (ph) ph.innerHTML = `<span>加载中…</span>`;
+
+  try {
+    const media = await bridge.apiGet("videos/media", { id });
+    if (!media?.data_url) throw new Error("无预览数据");
+    btn.innerHTML = "";
+    const video = document.createElement("video");
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = "metadata";
+    video.src = media.data_url;
+    video.addEventListener(
+      "click",
+      (e) => {
+        // 避免冒泡到 button 再次触发
+        e.stopPropagation();
+      },
+      true,
+    );
+    btn.appendChild(video);
+    btn.dataset.loaded = "1";
+    btn.classList.add("has-video");
+    video.play().catch(() => {});
+  } catch (err) {
+    const msg = String(err.message || err);
+    if (msg.includes("too large") || msg.includes("413")) {
+      toast("文件较大，请用「下载」查看");
+      if (ph) ph.innerHTML = `<span class="play-icon">⬇</span><span>请下载</span>`;
+    } else {
+      toast(`预览失败：${msg}`);
+      if (ph) ph.innerHTML = `<span class="play-icon">▶</span><span>预览</span>`;
+    }
+  } finally {
+    btn.classList.remove("loading");
+  }
 }
 
 function updateBatchButtons() {
@@ -250,7 +333,6 @@ async function refreshCurrent() {
   if (state.tab === "overview") await loadStats();
   else if (state.tab === "logs") await loadLogs();
   else await loadLibrary();
-  // 侧边数量也刷新一下
   try {
     const stats = await bridge.apiGet("stats");
     $("#subtitle").textContent =
@@ -296,21 +378,25 @@ function formatTs(raw) {
 
 async function openEdit(id) {
   try {
-    const data = await bridge.apiGet("videos", {
-      scope: "all",
-      q: id,
-      page: 1,
-      page_size: 20,
-    });
-    const item = (data.items || []).find((x) => x.id === id);
-    if (!item) {
+    const item = state.itemsById.get(id);
+    let target = item;
+    if (!target) {
+      const data = await bridge.apiGet("videos", {
+        scope: "all",
+        q: id,
+        page: 1,
+        page_size: 20,
+      });
+      target = (data.items || []).find((x) => x.id === id);
+    }
+    if (!target) {
       toast("未找到该条目");
       return;
     }
-    $("#editId").value = item.id;
-    $("#editNote").value = item.note || "";
-    $("#editTags").value = (item.tags || []).join(", ");
-    $("#editPinned").checked = !!item.pinned;
+    $("#editId").value = target.id;
+    $("#editNote").value = target.note || "";
+    $("#editTags").value = (target.tags || []).join(", ");
+    $("#editPinned").checked = !!target.pinned;
     $("#editDialog").showModal();
   } catch (err) {
     toast(`打开编辑失败：${err.message || err}`);
@@ -338,8 +424,8 @@ async function onUpload(file) {
   toast(`上传中：${file.name}`);
   try {
     const result = await bridge.upload("videos/upload", file);
-    const shortId = result?.item?.id_short || result?.item?.id?.slice?.(0, 8) || "";
-    toast(shortId ? `上传成功 ${shortId}` : "上传成功");
+    const seq = result?.item?.seq;
+    toast(seq ? `上传成功 #${seq}` : "上传成功");
     await refreshCurrent();
     if (state.tab !== "library") setTab("library");
   } catch (err) {

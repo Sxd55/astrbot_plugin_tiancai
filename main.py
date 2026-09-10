@@ -2,11 +2,14 @@
 
 Batch 1：索引 v2、权限白名单、冷却、软删除指令、降权随机
 Batch 2：WebUI 管理台（总览 / 列表 / 回收站 / 上传下载）
+Batch 3：顺序编号、默认标签「天菜」、卡片内视频预览
 """
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
 import random
 import re
 import shutil
@@ -31,9 +34,13 @@ from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 PLUGIN_NAME = "astrbot_plugin_tiancai"
 INDEX_FILENAME = "index.json"
 LOG_FILENAME = "audit.log"
-INDEX_VERSION = 2
+INDEX_VERSION = 3
+DEFAULT_TAGS = ["天菜"]
+# 预览走 base64，过大则提示改用下载（避免拖垮 Dashboard）
+PREVIEW_MAX_BYTES = 48 * 1024 * 1024
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".flv"}
 SAFE_ID_RE = re.compile(r"^[a-fA-F0-9]{8,64}$")
+SAFE_CODE_RE = re.compile(r"^[0-9a-fA-F]{1,64}$")
 
 
 def _now() -> int:
@@ -61,7 +68,7 @@ def _as_str_list(value: Any) -> list[str]:
     PLUGIN_NAME,
     "sxd55",
     "收藏群视频到本地，随机「看看天菜」",
-    "1.2.0",
+    "1.3.0",
 )
 class TiancaiPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -89,6 +96,7 @@ class TiancaiPlugin(Star):
             ("videos/update", self.api_update_video, ["POST"], "更新备注/标签/置顶"),
             ("videos/upload", self.api_upload_video, ["POST"], "上传视频入库"),
             ("videos/download", self.api_download_video, ["GET"], "下载视频文件"),
+            ("videos/media", self.api_media_video, ["GET"], "预览用媒体数据"),
             ("logs", self.api_logs, ["GET"], "审计日志"),
         ]
         for path, handler, methods, desc in apis:
@@ -195,9 +203,12 @@ class TiancaiPlugin(Star):
 
         if q:
             def match(v: dict[str, Any]) -> bool:
+                seq = str(v.get("seq") or "")
                 blob = " ".join(
                     [
                         str(v.get("id") or ""),
+                        seq,
+                        f"#{seq}" if seq else "",
                         str(v.get("note") or ""),
                         str(v.get("collector_name") or ""),
                         str(v.get("collector_id") or ""),
@@ -225,6 +236,8 @@ class TiancaiPlugin(Star):
             items.sort(
                 key=lambda x: int(x.get("last_played_at") or 0), reverse=reverse
             )
+        elif sort == "seq":
+            items.sort(key=lambda x: int(x.get("seq") or 0), reverse=reverse)
         else:
             items.sort(key=lambda x: int(x.get("saved_at") or 0), reverse=reverse)
 
@@ -324,15 +337,27 @@ class TiancaiPlugin(Star):
     async def api_update_video(self):
         payload = await request.json(default={})
         video_id = str(payload.get("id") or "").strip()
-        if not video_id or not SAFE_ID_RE.match(video_id):
-            return error_response("invalid id", status_code=400)
-
-        index = self._load_index()
         target = None
-        for item in index.get("videos", []):
-            if str(item.get("id")) == video_id:
-                target = item
-                break
+        index = self._load_index()
+
+        if video_id and SAFE_ID_RE.match(video_id):
+            for item in index.get("videos", []):
+                if str(item.get("id")) == video_id:
+                    target = item
+                    break
+        else:
+            # 也允许用顺序编号更新
+            try:
+                seq = int(payload.get("seq") or payload.get("id") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq > 0:
+                for item in index.get("videos", []):
+                    if int(item.get("seq") or 0) == seq:
+                        target = item
+                        video_id = str(item.get("id"))
+                        break
+
         if target is None:
             return error_response("not found", status_code=404)
 
@@ -352,6 +377,8 @@ class TiancaiPlugin(Star):
                     text = part.strip()
                     if text and text not in tags:
                         tags.append(text[:32])
+            if not tags:
+                tags = list(DEFAULT_TAGS)
             target["tags"] = tags[:20]
         if "pinned" in payload:
             target["pinned"] = bool(payload.get("pinned"))
@@ -393,6 +420,7 @@ class TiancaiPlugin(Star):
             return error_response(f"save failed: {exc}", status_code=500)
 
         size = dest.stat().st_size if dest.is_file() else 0
+        seq = self._next_seq(index)
         record = self._new_record(
             video_id=video_id,
             filename=dest.name,
@@ -401,28 +429,21 @@ class TiancaiPlugin(Star):
             source_group_id="",
             collector_id=f"web:{request.username or 'dashboard'}",
             collector_name=str(request.username or "dashboard"),
+            seq=seq,
         )
         record["note"] = f"WebUI 上传 · {filename}"[:200]
         index.setdefault("videos", []).append(record)
+        index["next_seq"] = seq + 1
         self._save_index(index)
         self._audit(
             "web_upload",
             video_id=video_id,
-            detail=f"name={filename};size={size};by={request.username}",
+            detail=f"name={filename};size={size};seq={seq};by={request.username}",
         )
         return json_response({"item": self._public_item(record)})
 
     async def api_download_video(self):
-        video_id = str(request.query.get("id", "") or "").strip()
-        if not video_id or not SAFE_ID_RE.match(video_id):
-            return error_response("invalid id", status_code=400)
-
-        index = self._load_index()
-        target = None
-        for item in index.get("videos", []):
-            if str(item.get("id")) == video_id:
-                target = item
-                break
+        target = self._find_by_query_id()
         if target is None:
             return error_response("not found", status_code=404)
 
@@ -430,8 +451,66 @@ class TiancaiPlugin(Star):
         if not path.is_file():
             return error_response("file missing", status_code=404)
 
-        name = f"tiancai_{video_id[:8]}{path.suffix or '.mp4'}"
-        return file_response(path, filename=name, content_type="video/mp4")
+        seq = int(target.get("seq") or 0)
+        name = f"tiancai_{seq or str(target.get('id'))[:8]}{path.suffix or '.mp4'}"
+        mime, _ = mimetypes.guess_type(str(path))
+        return file_response(
+            path,
+            filename=name,
+            content_type=mime or "video/mp4",
+        )
+
+    async def api_media_video(self):
+        """返回 data URL，供管理台 <video> 预览（小文件）。"""
+        target = self._find_by_query_id()
+        if target is None:
+            return error_response("not found", status_code=404)
+
+        path = self.videos_dir / str(target.get("filename", ""))
+        if not path.is_file():
+            return error_response("file missing", status_code=404)
+
+        size = path.stat().st_size
+        if size > PREVIEW_MAX_BYTES:
+            return error_response(
+                f"file too large for inline preview ({self._fmt_size(size)}), use download",
+                status_code=413,
+            )
+
+        mime, _ = mimetypes.guess_type(str(path))
+        mime = mime or "video/mp4"
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            return error_response(f"read failed: {exc}", status_code=500)
+
+        b64 = base64.b64encode(data).decode("ascii")
+        return json_response(
+            {
+                "id": target.get("id"),
+                "seq": target.get("seq"),
+                "mime": mime,
+                "size": size,
+                "data_url": f"data:{mime};base64,{b64}",
+            }
+        )
+
+    def _find_by_query_id(self) -> dict[str, Any] | None:
+        raw = str(request.query.get("id", "") or "").strip()
+        seq_raw = str(request.query.get("seq", "") or "").strip()
+        index = self._load_index()
+        if raw and SAFE_ID_RE.match(raw):
+            for item in index.get("videos", []):
+                if str(item.get("id")) == raw:
+                    return item
+        # 纯数字：当顺序号
+        code = raw or seq_raw
+        if code.isdigit():
+            seq = int(code)
+            for item in index.get("videos", []):
+                if int(item.get("seq") or 0) == seq:
+                    return item
+        return None
 
     async def api_logs(self):
         try:
@@ -467,15 +546,26 @@ class TiancaiPlugin(Star):
         return json_response({"items": items})
 
     def _normalize_ids(self, raw: Any) -> set[str]:
+        """支持完整 uuid，或顺序编号（会解析成对应 uuid）。"""
         ids: set[str] = set()
         if isinstance(raw, str):
             raw = [raw]
         if not isinstance(raw, list):
             return ids
+        index = self._load_index()
+        seq_map = {
+            int(v.get("seq") or 0): str(v.get("id"))
+            for v in index.get("videos", [])
+            if isinstance(v, dict) and int(v.get("seq") or 0) > 0
+        }
         for item in raw:
             text = str(item).strip()
             if SAFE_ID_RE.match(text):
                 ids.add(text)
+            elif text.isdigit():
+                mapped = seq_map.get(int(text))
+                if mapped:
+                    ids.add(mapped)
         return ids
 
     def _public_item(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -487,9 +577,11 @@ class TiancaiPlugin(Star):
                 size = path.stat().st_size
             except OSError:
                 pass
+        seq = int(item.get("seq") or 0)
         return {
             "id": item.get("id"),
-            "id_short": str(item.get("id") or "")[:8],
+            "seq": seq,
+            "id_short": str(seq) if seq > 0 else str(item.get("id") or "")[:8],
             "filename": item.get("filename"),
             "saved_at": item.get("saved_at"),
             "saved_at_human": self._fmt_time(item.get("saved_at")),
@@ -500,7 +592,7 @@ class TiancaiPlugin(Star):
             "size": size,
             "size_human": self._fmt_size(size),
             "note": item.get("note") or "",
-            "tags": item.get("tags") or [],
+            "tags": item.get("tags") or list(DEFAULT_TAGS),
             "play_count": int(item.get("play_count") or 0),
             "last_played_at": item.get("last_played_at"),
             "last_played_at_human": self._fmt_time(item.get("last_played_at")) or "",
@@ -510,6 +602,7 @@ class TiancaiPlugin(Star):
             "deleted_by": item.get("deleted_by") or "",
             "file_exists": exists,
             "in_trash": item.get("deleted_at") is not None,
+            "can_preview": exists and size <= PREVIEW_MAX_BYTES,
         }
 
     # ------------------------------------------------------------------
@@ -580,6 +673,7 @@ class TiancaiPlugin(Star):
             yield event.plain_result(f"保存失败：写入本地目录出错（{exc}）")
             return
 
+        seq = self._next_seq(index)
         record = self._new_record(
             video_id=video_id,
             filename=dest.name,
@@ -590,19 +684,21 @@ class TiancaiPlugin(Star):
             ),
             collector_id=str(event.get_sender_id() or ""),
             collector_name=str(event.get_sender_name() or ""),
+            seq=seq,
         )
         index.setdefault("videos", []).append(record)
+        index["next_seq"] = seq + 1
         self._save_index(index)
         self._audit(
             "collect",
             event,
             video_id=video_id,
-            detail=f"size={record['size']}",
+            detail=f"size={record['size']};seq={seq}",
         )
 
         yield event.plain_result(
             f"已收进天菜！当前在库 {len(self._active_videos(index))} 条。\n"
-            f"编号：{video_id[:8]}"
+            f"编号：#{seq}"
         )
 
     @filter.command("看看天菜", alias={"来点天菜", "天菜"})
@@ -654,25 +750,23 @@ class TiancaiPlugin(Star):
 
     @filter.command("删除天菜", alias={"天菜删除"})
     async def delete_tiancai(self, event: AstrMessageEvent, code: str = ""):
-        """软删除一条天菜。用法：删除天菜 <编号前缀>"""
-        code = (code or "").strip().lower()
+        """软删除一条天菜。用法：删除天菜 <编号>，例如：删除天菜 3"""
+        code = (code or "").strip().lstrip("#")
         if not code:
-            yield event.plain_result("用法：删除天菜 <编号前缀>，例如：删除天菜 ab12cd34")
+            yield event.plain_result("用法：删除天菜 <编号>，例如：删除天菜 3")
             return
 
         index = self._load_index()
-        matches = [
-            item
-            for item in self._active_videos(index)
-            if str(item.get("id", "")).lower().startswith(code)
-        ]
+        matches = self._match_videos(self._active_videos(index), code)
         if not matches:
-            yield event.plain_result(f"没有找到编号以「{code}」开头的在库天菜。")
+            yield event.plain_result(f"没有找到编号「{code}」的在库天菜。")
             return
         if len(matches) > 1:
-            preview = "、".join(str(m["id"])[:8] for m in matches[:5])
+            preview = "、".join(
+                f"#{m.get('seq')}" for m in matches[:5] if m.get("seq")
+            )
             yield event.plain_result(
-                f"匹配到 {len(matches)} 条，请把编号写得更完整一些。\n候选：{preview}"
+                f"匹配到 {len(matches)} 条，请使用精确数字编号。\n候选：{preview}"
             )
             return
 
@@ -687,31 +781,29 @@ class TiancaiPlugin(Star):
         self._save_index(index)
         self._audit("soft_delete", event, video_id=str(item["id"]))
         yield event.plain_result(
-            f"已将天菜移入回收站。\n编号：{str(item['id'])[:8]}\n"
+            f"已将天菜移入回收站。\n编号：#{item.get('seq') or str(item['id'])[:8]}\n"
             "可在 WebUI「天菜管理台」回收站恢复或永久删除。"
         )
 
     @filter.command("天菜详情", alias={"天菜信息"})
     async def tiancai_detail(self, event: AstrMessageEvent, code: str = ""):
-        """查看一条天菜的元信息。用法：天菜详情 <编号前缀>"""
-        code = (code or "").strip().lower()
+        """查看一条天菜的元信息。用法：天菜详情 <编号>"""
+        code = (code or "").strip().lstrip("#")
         if not code:
-            yield event.plain_result("用法：天菜详情 <编号前缀>")
+            yield event.plain_result("用法：天菜详情 <编号>，例如：天菜详情 3")
             return
 
         index = self._load_index()
-        matches = [
-            item
-            for item in index.get("videos", [])
-            if str(item.get("id", "")).lower().startswith(code)
-        ]
+        matches = self._match_videos(index.get("videos", []), code)
         if not matches:
-            yield event.plain_result(f"没有找到编号以「{code}」开头的天菜。")
+            yield event.plain_result(f"没有找到编号「{code}」的天菜。")
             return
         if len(matches) > 1:
-            preview = "、".join(str(m["id"])[:8] for m in matches[:5])
+            preview = "、".join(
+                f"#{m.get('seq')}" for m in matches[:5] if m.get("seq")
+            )
             yield event.plain_result(
-                f"匹配到 {len(matches)} 条，请把编号写得更完整。\n候选：{preview}"
+                f"匹配到 {len(matches)} 条，请使用精确数字编号。\n候选：{preview}"
             )
             return
 
@@ -725,7 +817,8 @@ class TiancaiPlugin(Star):
         last_played = self._fmt_time(item.get("last_played_at")) or "尚未抽出"
         yield event.plain_result(
             "天菜详情\n"
-            f"编号：{item.get('id')}\n"
+            f"编号：#{item.get('seq') or '-'}\n"
+            f"内部ID：{item.get('id')}\n"
             f"状态：{status}\n"
             f"大小：{self._fmt_size(item.get('size'))}\n"
             f"入库：{saved_at}\n"
@@ -743,15 +836,15 @@ class TiancaiPlugin(Star):
         """查看天菜插件指令说明。"""
         yield event.plain_result(
             "天菜视频库指令\n"
-            "· 收进天菜：回复视频后入库（管理员/白名单）\n"
+            "· 收进天菜：回复视频后入库（管理员/白名单），默认标签「天菜」\n"
             "· 看看天菜：随机发一条（带冷却，少重复）\n"
             "· 天菜数量：查看在库/回收站数量\n"
-            "· 删除天菜 <编号>：移入回收站\n"
+            "· 删除天菜 <编号>：移入回收站，如 删除天菜 3\n"
             "· 天菜详情 <编号>：查看元信息\n"
             "· 清空天菜：管理员将全部在库移入回收站\n"
             "· 天菜帮助：查看本说明\n"
             "\n"
-            "WebUI：插件详情 → 天菜管理台（浏览/上传/回收站）"
+            "编号从 1 起递增。WebUI：插件详情 → 天菜管理台（预览/上传/回收站）"
         )
 
     @filter.permission_type(filter.PermissionType.ADMIN)
@@ -981,9 +1074,11 @@ class TiancaiPlugin(Star):
         source_group_id: str,
         collector_id: str,
         collector_name: str,
+        seq: int,
     ) -> dict[str, Any]:
         return {
             "id": video_id,
+            "seq": int(seq),
             "filename": filename,
             "saved_at": _now(),
             "source_message_id": source_message_id,
@@ -992,7 +1087,7 @@ class TiancaiPlugin(Star):
             "collector_name": collector_name,
             "size": size,
             "note": "",
-            "tags": [],
+            "tags": list(DEFAULT_TAGS),
             "play_count": 0,
             "last_played_at": None,
             "pinned": False,
@@ -1000,6 +1095,41 @@ class TiancaiPlugin(Star):
             "deleted_by": None,
             "sha256": None,
         }
+
+    def _next_seq(self, index: dict[str, Any]) -> int:
+        try:
+            nxt = int(index.get("next_seq") or 0)
+        except (TypeError, ValueError):
+            nxt = 0
+        if nxt <= 0:
+            max_seq = 0
+            for item in index.get("videos", []):
+                try:
+                    max_seq = max(max_seq, int(item.get("seq") or 0))
+                except (TypeError, ValueError):
+                    pass
+            nxt = max_seq + 1
+        return nxt
+
+    def _match_videos(
+        self, videos: list[dict[str, Any]], code: str
+    ) -> list[dict[str, Any]]:
+        code = (code or "").strip().lstrip("#")
+        if not code:
+            return []
+        # 优先精确匹配顺序编号
+        if code.isdigit():
+            seq = int(code)
+            exact = [v for v in videos if int(v.get("seq") or 0) == seq]
+            if exact:
+                return exact
+        code_l = code.lower()
+        return [
+            v
+            for v in videos
+            if str(v.get("id") or "").lower().startswith(code_l)
+            or str(v.get("seq") or "") == code
+        ]
 
     def _ensure_index(self) -> None:
         if not self.index_path.exists():
@@ -1012,6 +1142,7 @@ class TiancaiPlugin(Star):
             "version": INDEX_VERSION,
             "videos": [],
             "recent_sent_ids": [],
+            "next_seq": 1,
         }
 
     def _migrate_index(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -1020,7 +1151,8 @@ class TiancaiPlugin(Star):
         if not isinstance(videos_in, list):
             videos_in = []
 
-        videos: list[dict[str, Any]] = []
+        # 按入库时间排序后分配缺失的 seq，保证旧数据从 1 连续编号
+        prepared: list[dict[str, Any]] = []
         for raw in videos_in:
             if not isinstance(raw, dict):
                 continue
@@ -1035,27 +1167,62 @@ class TiancaiPlugin(Star):
             item.setdefault("size", 0)
             item.setdefault("note", "")
             tags = item.get("tags")
-            if not isinstance(tags, list):
-                item["tags"] = []
+            if not isinstance(tags, list) or not tags:
+                item["tags"] = list(DEFAULT_TAGS)
             item.setdefault("play_count", 0)
             item.setdefault("last_played_at", None)
             item.setdefault("pinned", False)
             item.setdefault("deleted_at", None)
             item.setdefault("deleted_by", None)
             item.setdefault("sha256", None)
-            videos.append(item)
+            prepared.append(item)
+
+        prepared.sort(key=lambda x: (int(x.get("saved_at") or 0), str(x.get("id"))))
+        used_seqs: set[int] = set()
+        for item in prepared:
+            try:
+                seq_val = int(item.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq_val = 0
+            if seq_val > 0 and seq_val not in used_seqs:
+                item["seq"] = seq_val
+                used_seqs.add(seq_val)
+            else:
+                item["seq"] = 0
+
+        next_free = 1
+        for item in prepared:
+            if int(item.get("seq") or 0) > 0:
+                continue
+            while next_free in used_seqs:
+                next_free += 1
+            item["seq"] = next_free
+            used_seqs.add(next_free)
+            next_free += 1
+
+        max_seq = max(used_seqs) if used_seqs else 0
+        try:
+            next_seq = int(data.get("next_seq") or 0)
+        except (TypeError, ValueError):
+            next_seq = 0
+        if next_seq <= max_seq:
+            next_seq = max_seq + 1
 
         migrated = {
             "version": INDEX_VERSION,
-            "videos": videos,
+            "videos": prepared,
             "recent_sent_ids": [
                 str(x)
                 for x in (data.get("recent_sent_ids") or [])
                 if x is not None
             ],
+            "next_seq": next_seq,
         }
-        if version < INDEX_VERSION:
-            logger.info("天菜索引已从 v%s 迁移到 v%s", version, INDEX_VERSION)
+        need_save = version < INDEX_VERSION or any(
+            not raw.get("seq") for raw in videos_in if isinstance(raw, dict)
+        )
+        if need_save:
+            logger.info("天菜索引已迁移到 v%s（含顺序编号）", INDEX_VERSION)
             self._save_index(migrated)
         return migrated
 
@@ -1078,6 +1245,8 @@ class TiancaiPlugin(Star):
             payload["recent_sent_ids"], list
         ):
             payload["recent_sent_ids"] = []
+        if "next_seq" not in payload:
+            payload["next_seq"] = self._next_seq(payload)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         tmp = self.index_path.with_suffix(".tmp")
         tmp.write_text(
