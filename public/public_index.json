@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": 1789144683,
+  "updated_at": 1789193569,
   "name": "天菜公共库",
   "license_note": "仅放维护者有权公开分发的内容。用户插件只读同步，不能上传。",
   "maintainer": "sxd55",
@@ -46,6 +46,48 @@
       "created_at": 1789144683,
       "source_local_id": "d295f5a91af846efa0549231df08f1f1",
       "source_local_seq": 1
+    },
+    {
+      "id": "local_2a53a706eb05483e88d8b58bbb3d7486",
+      "seq": 4,
+      "title": "天菜#7",
+      "tags": [
+        "天菜"
+      ],
+      "url": "https://github.com/Sxd55/astrbot_plugin_tiancai/releases/download/tiancai-videos/local_2a53a706eb05483e88d8b58bbb3d7486.mp4",
+      "size": 3839615,
+      "sha256": "7398665485862b8eb1c68dc54fe7619fa080052c8ee47e71d89ece37d3423bff",
+      "created_at": 1789193563,
+      "source_local_id": "2a53a706eb05483e88d8b58bbb3d7486",
+      "source_local_seq": 7
+    },
+    {
+      "id": "local_ad45126788d84f6695fb64f7f9231a2c",
+      "seq": 5,
+      "title": "天菜#9",
+      "tags": [
+        "天菜"
+      ],
+      "url": "https://github.com/Sxd55/astrbot_plugin_tiancai/releases/download/tiancai-videos/local_ad45126788d84f6695fb64f7f9231a2c.mp4",
+      "size": 2332354,
+      "sha256": "a9a25024561961f4d88e249b4656ff61d0ecc3845499389b81e8727b27b04c89",
+      "created_at": 1789193567,
+      "source_local_id": "ad45126788d84f6695fb64f7f9231a2c",
+      "source_local_seq": 9
+    },
+    {
+      "id": "local_b51e2fa8573d4db3b9b590066546ca4e",
+      "seq": 6,
+      "title": "天菜#8",
+      "tags": [
+        "天菜"
+      ],
+      "url": "https://github.com/Sxd55/astrbot_plugin_tiancai/releases/download/tiancai-videos/local_b51e2fa8573d4db3b9b590066546ca4e.mp4",
+      "size": 1318294,
+      "sha256": "7e9e0d8268187b657ee5f55a4c760c92e1650ef35fb9fccea8bd57cd9543e6e7",
+      "created_at": 1789193569,
+      "source_local_id": "b51e2fa8573d4db3b9b590066546ca4e",
+      "source_local_seq": 8
     }
   ]
 }
